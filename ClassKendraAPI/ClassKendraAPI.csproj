@@ -8,6 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Data\ClassKendraContext.Tenant.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Data\ClassKendraContext.Tenant.cs" />
     <None Include="efpt.config.json.user" />
   </ItemGroup>
 
