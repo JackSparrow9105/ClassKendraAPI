@@ -6,6 +6,7 @@ using ClassKendraAPI.Common;
 using ClassKendraAPI.Features.Auth;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using ClassKendraAPI.Features.Fees;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -45,6 +46,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddScoped<OtpService>();
+builder.Services.AddScoped<FeeReadService>();
 builder.Services.AddSingleton<TokenService>();
 
 
