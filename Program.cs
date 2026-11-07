@@ -78,6 +78,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(o =>
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddScoped<OtpService>();
+builder.Services.AddScoped<PinService>();   // app PIN + remembered devices
 builder.Services.AddScoped<FeeReadService>();
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddScoped<ReminderService>();
@@ -87,6 +88,7 @@ builder.Services.AddScoped<PlanService>();
 builder.Services.AddScoped<SubscriptionService>();
 builder.Services.AddScoped<OnlinePaymentService>();
 builder.Services.AddSingleton<TokenService>();
+builder.Services.AddSingleton<FirebaseTokenValidator>();   // SMS login via Firebase (off until Firebase:ProjectId is set)
 builder.Services.AddHttpClient<RazorpayClient>(c => c.Timeout = TimeSpan.FromSeconds(20));
 
 // WhatsApp: "Meta" sends for real; anything else only writes to the log (development).

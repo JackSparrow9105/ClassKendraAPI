@@ -38,5 +38,7 @@ public partial class ClassKendraContext
 		modelBuilder.Entity<AttendanceSheet>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
 		modelBuilder.Entity<Message>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
 		modelBuilder.Entity<PromotionRun>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
+
+		ConfigurePins(modelBuilder);   // app PIN columns + UserDevices (ClassKendraContext.Pin.cs)
 	}
 }
