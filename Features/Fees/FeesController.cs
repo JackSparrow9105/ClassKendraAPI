@@ -5,7 +5,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace ClassKendraAPI.Features.Fees;
-
 public record RemindInput(string[] StudentIds);
 public record SentResult(int Sent);
 public record RaiseResult(int Created);
