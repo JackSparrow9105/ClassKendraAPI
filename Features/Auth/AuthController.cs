@@ -17,9 +17,12 @@ public record SetPinRequest(string Pin, string? DeviceToken);
 public record UnlockRequest(string DeviceToken, string Pin);
 public record DeviceRequest(string DeviceToken);
 
-/// <summary>HasPin: an app PIN is set. PinRequired: owner and office staff must set one (teachers may skip).</summary>
+/// <summary>
+/// HasPin: an app PIN is set. PinRequired: owner and office staff must set one (teachers may skip).
+/// Email: verified backup email for login codes when the phone doesn't work (null = none).
+/// </summary>
 public record AuthUserDto(string Id, string Phone, string Name, string Role, string? TenantId, string[] BatchIds,
-    bool HasPin, bool PinRequired);
+    bool HasPin, bool PinRequired, string? Email);
 
 /// <summary>DeviceToken is only sent when the app should store a new one; null = keep the one you have.</summary>
 public record AuthResponse(string Token, AuthUserDto User, string? DeviceToken);
@@ -247,7 +250,7 @@ public class AuthController(ClassKendraContext db, OtpService otp, TokenService 
 
     private static bool PinRequired(User user) => user.Role is "Owner" or "Staff";
 
-    private static AuthUserDto ToDto(User user) => new(
+    internal static AuthUserDto ToDto(User user) => new(
         user.Id.ToString(),
         user.Phone,
         user.Name,
@@ -255,5 +258,6 @@ public class AuthController(ClassKendraContext db, OtpService otp, TokenService 
         user.TenantId?.ToString(),
         user.Role == "Teacher" ? user.Batches.Select(b => b.Id.ToString()).ToArray() : [],
         user.PinHash is not null,
-        PinRequired(user));
+        PinRequired(user),
+        user.Email);
 }

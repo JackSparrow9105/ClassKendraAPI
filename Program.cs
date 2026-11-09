@@ -79,6 +79,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<CurrentUser>();
 builder.Services.AddScoped<OtpService>();
 builder.Services.AddScoped<PinService>();   // app PIN + remembered devices
+builder.Services.AddScoped<EmailCodeService>();   // backup email codes
 builder.Services.AddScoped<FeeReadService>();
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddScoped<ReminderService>();
@@ -96,6 +97,12 @@ if (builder.Configuration["WhatsApp:Provider"] == "Meta")
     builder.Services.AddHttpClient<IWhatsAppSender, MetaWhatsAppSender>(c => c.Timeout = TimeSpan.FromSeconds(20));
 else
     builder.Services.AddSingleton<IWhatsAppSender, LogWhatsAppSender>();
+
+// Email (backup email login codes): "Smtp" sends for real; anything else only writes to the log (development).
+if (builder.Configuration["Email:Provider"] == "Smtp")
+    builder.Services.AddSingleton<IEmailSender, SmtpEmailSender>();
+else
+    builder.Services.AddSingleton<IEmailSender, LogEmailSender>();
 
 // ---------- Background jobs (WhatsApp outbox, daily bills + reminders) ----------
 if (builder.Configuration.GetValue("Jobs:Enabled", true))

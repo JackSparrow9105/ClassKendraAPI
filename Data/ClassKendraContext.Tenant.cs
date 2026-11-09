@@ -41,5 +41,6 @@ public partial class ClassKendraContext
 
 		ConfigurePins(modelBuilder);   // app PIN columns + UserDevices (ClassKendraContext.Pin.cs)
 		ConfigureReceipts(modelBuilder);   // centre address/phone/logo + frozen receipts (ClassKendraContext.Receipt.cs)
+		ConfigureBackupEmail(modelBuilder);   // backup email + EmailCodes (ClassKendraContext.BackupEmail.cs)
 	}
 }

@@ -78,3 +78,23 @@ parameter order in `Features/Messages/MessageService.cs`:
 - Messages.Type: FeeReminder, AbsentAlert, Receipt, StaffInvite · Messages.Status: Queued, Sent, Delivered, Read, Failed
 - Subscriptions.Status: Created, Active · Subscriptions.Cycle: Monthly, Yearly
 - Users.Role: Owner, Staff, Teacher
+
+## Backup email (2026-11-09)
+Lets a user get their login code by email when their mobile number stops working.
+Database: run `Database/2026-11-09-backup-email.sql` once.
+
+Endpoints (all under /api/v1/auth):
+- `POST /email { email, pin? }` → `{ sentTo }` — signed in; sends a code to the new email. Users with a PIN must send it.
+- `POST /email/verify { code }` → user — saves the email as the verified backup email; the previous one is told.
+- `DELETE /email` → user — removes it; the removed address is told.
+- `POST /email-login { phone }` → `{ sentTo: "a•••@gmail.com" }` — 404 if the number has no backup email.
+- `POST /email-login/verify { phone, code }` → `{ token, user, deviceToken }` — same as a phone OTP login.
+`AuthUserDto` now also has `email` (null = none).
+
+Settings:
+```
+Email:Provider = Smtp                    (anything else = log only: codes show in Log stream as "DEV EMAIL")
+Email:Host, Email:Port (587), Email:User, Email:Password, Email:From, Email:FromName
+```
+Brevo: Host smtp-relay.brevo.com, Port 587, User = the SMTP login shown in Brevo, Password = an SMTP key,
+From = a sender address verified in Brevo. Gmail: smtp.gmail.com, 587, your Gmail + an app password.
