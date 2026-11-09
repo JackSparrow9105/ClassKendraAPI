@@ -14,10 +14,13 @@ public record FeeDueView(
 
 public record AllocationView(string DueId, string HeadName, string PeriodLabel, int Amount);
 
+/// <param name="BalanceAfter">What the student owed right after this payment (from the frozen receipt).</param>
+/// <param name="Receipt">Everything printed on the receipt, frozen at payment time. The receipt page draws only from this.</param>
 public record PaymentView(
     string Id, string ReceiptNo, string StudentId, int Amount, string Mode, string PaidOn,
     string Note, string ReceivedBy, List<AllocationView> Allocations,
-    string StudentName, string BatchName, string ParentPhone, int BalanceAfter);
+    string StudentName, string BatchName, string ParentPhone, int BalanceAfter,
+    ReceiptSnapshot Receipt);
 
 public static class FeeViews
 {
@@ -57,30 +60,21 @@ public class FeeReadService(ClassKendraContext db, IConfiguration config)
 
         var students = await db.Students.AsNoTracking()
             .Where(s => ids.Contains(s.Id))
-            .Select(s => new { s.Id, s.Name, s.ParentPhone, BatchName = s.Batch.Name })
+            .Select(s => new { s.Id, s.Name, s.ParentName, s.ParentPhone, BatchName = s.Batch.Name })
             .ToDictionaryAsync(s => s.Id, ct);
 
-        // What each student owes right now.
-        var owedNow = await db.FeeDues
-            .Where(d => ids.Contains(d.StudentId) && d.Status != "Cancelled")
-            .GroupBy(d => d.StudentId)
-           .Select(g => new { g.Key, Owed = g.Sum(d => (d.Amount ?? 0) - d.PaidAmount) })
-            .ToDictionaryAsync(x => x.Key, x => x.Owed, ct);
-
-        var allPayments = await db.Payments.AsNoTracking()
-            .Where(p => ids.Contains(p.StudentId))
-            .Select(p => new { p.StudentId, p.PaidOn, p.ReceiptNo, p.Amount })
-            .ToListAsync(ct);
+        var snapshots = payments.ToDictionary(p => p.Id, p => ReceiptSnapshots.Read(p.ReceiptSnapshot));
+        if (snapshots.ContainsValue(null))
+            await RebuildMissing(payments.Where(p => snapshots[p.Id] is null).ToList(), ids, snapshots,
+                id => students.GetValueOrDefault(id) is { } s
+                    ? new ReceiptStudent(s.Name, s.ParentName ?? "", s.ParentPhone ?? "", s.BatchName)
+                    : new ReceiptStudent("Unknown", "", "", ""),
+                ct);
 
         return payments.Select(p =>
         {
             var st = students.GetValueOrDefault(p.StudentId);
-            // Balance after this payment = owed now + everything paid after it.
-            var paidLater = allPayments
-                .Where(x => x.StudentId == p.StudentId &&
-                            (x.PaidOn > p.PaidOn || (x.PaidOn == p.PaidOn && string.CompareOrdinal(x.ReceiptNo, p.ReceiptNo) > 0)))
-                .Sum(x => x.Amount);
-
+            var receipt = snapshots[p.Id]!;
             return new PaymentView(
                 p.Id.ToString(), p.ReceiptNo, p.StudentId.ToString(), p.Amount, p.Mode,
                 p.PaidOn.ToString("yyyy-MM-dd"), p.Note, p.ReceivedByName,
@@ -88,8 +82,53 @@ public class FeeReadService(ClassKendraContext db, IConfiguration config)
                     .Select(a => new AllocationView(a.FeeDueId.ToString(), a.FeeDue.HeadName, a.FeeDue.PeriodLabel, a.Amount))
                     .ToList(),
                 st?.Name ?? "Unknown", st?.BatchName ?? "", st?.ParentPhone ?? "",
-                owedNow.GetValueOrDefault(p.StudentId) + paidLater);
+                receipt.BalanceAfter,
+                receipt);
         }).ToList();
+    }
+
+    /// <summary>
+    /// Payments made before receipts were frozen: build the receipt once from today's data, mark it
+    /// "rebuilt" and save it, so from now on it never changes either.
+    /// </summary>
+    private async Task RebuildMissing(
+        List<Payment> missing, List<Guid> studentIds, Dictionary<Guid, ReceiptSnapshot?> snapshots,
+        Func<Guid, ReceiptStudent> studentOf, CancellationToken ct)
+    {
+        var centre = await db.Tenants.AsNoTracking().FirstAsync(ct);
+
+        // Balance after a payment = owed now + everything paid after it.
+        var owedNow = await db.FeeDues
+            .Where(d => studentIds.Contains(d.StudentId) && d.Status != "Cancelled")
+            .GroupBy(d => d.StudentId)
+            .Select(g => new { g.Key, Owed = g.Sum(d => (d.Amount ?? 0) - d.PaidAmount) })
+            .ToDictionaryAsync(x => x.Key, x => x.Owed, ct);
+
+        var allPayments = await db.Payments.AsNoTracking()
+            .Where(p => studentIds.Contains(p.StudentId))
+            .Select(p => new { p.StudentId, p.PaidOn, p.ReceiptNo, p.Amount })
+            .ToListAsync(ct);
+
+        foreach (var p in missing)
+        {
+            var paidLater = allPayments
+                .Where(x => x.StudentId == p.StudentId &&
+                            (x.PaidOn > p.PaidOn || (x.PaidOn == p.PaidOn && string.CompareOrdinal(x.ReceiptNo, p.ReceiptNo) > 0)))
+                .Sum(x => x.Amount);
+
+            var snapshot = ReceiptSnapshots.Build(
+                p, centre, studentOf(p.StudentId),
+                p.PaymentAllocations.Select(a => new ReceiptLine(a.FeeDue.HeadName, a.FeeDue.PeriodLabel, a.Amount)),
+                owedNow.GetValueOrDefault(p.StudentId) + paidLater,
+                rebuilt: true);
+            snapshots[p.Id] = snapshot;
+
+            // Only fills an empty column, so it never overwrites a receipt frozen at payment time.
+            var json = ReceiptSnapshots.Serialize(snapshot);
+            await db.Payments
+                .Where(x => x.Id == p.Id && x.ReceiptSnapshot == null)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.ReceiptSnapshot, json), ct);
+        }
     }
 }
 /// <summary>One row per student on the Fees screen and the dashboard (StudentFees in models.ts).</summary>

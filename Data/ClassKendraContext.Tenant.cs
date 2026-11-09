@@ -40,5 +40,6 @@ public partial class ClassKendraContext
 		modelBuilder.Entity<PromotionRun>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
 
 		ConfigurePins(modelBuilder);   // app PIN columns + UserDevices (ClassKendraContext.Pin.cs)
+		ConfigureReceipts(modelBuilder);   // centre address/phone/logo + frozen receipts (ClassKendraContext.Receipt.cs)
 	}
 }

@@ -88,6 +88,18 @@ public class PaymentService(ClassKendraContext db, CurrentUser current)
             left -= take;
         }
 
+        // Freeze what the receipt shows, as it is right now, in the same save as the payment.
+        var centre = await db.Tenants.AsNoTracking().FirstAsync(ct);
+        var student = await db.Students.AsNoTracking()
+            .Where(s => s.Id == r.StudentId)
+            .Select(s => new ReceiptStudent(s.Name, s.ParentName ?? "", s.ParentPhone ?? "", s.Batch.Name))
+            .FirstAsync(ct);
+        var lines = payment.PaymentAllocations
+            .Select(a => new ReceiptLine(a.FeeDue.HeadName, a.FeeDue.PeriodLabel, a.Amount));
+        var balanceAfter = unpaid.Sum(Balance) - left;   // what the student still owes after this payment
+        payment.ReceiptSnapshot = ReceiptSnapshots.Serialize(
+            ReceiptSnapshots.Build(payment, centre, student, lines, balanceAfter, rebuilt: false));
+
         db.Payments.Add(payment);
         await db.SaveChangesAsync(ct);
         return payment;
