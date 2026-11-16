@@ -95,10 +95,23 @@ public class AttendanceController(ClassKendraContext db, CurrentUser current, Me
         }
 
         var alerted = 0;
-        if (day == today)
+        var mode = (await messages.SettingsAsync(ct)).AbsentAlerts;
+        if (day == today && mode != AbsentAlertModes.Off)
         {
+            // "Only after 2 classes in a row": who was also absent at this batch's previous class?
+            HashSet<Guid>? absentLastClass = null;
+            if (mode == AbsentAlertModes.TwoDays)
+            {
+                absentLastClass = (await db.AttendanceSheets.AsNoTracking()
+                    .Where(a => a.BatchId == batchId && a.Date < day)
+                    .OrderByDescending(a => a.Date)
+                    .Select(a => a.AttendanceAbsences.Select(x => x.StudentId).ToList())
+                    .FirstOrDefaultAsync(ct) ?? []).ToHashSet();
+            }
+
             foreach (var row in sheet.AttendanceAbsences.Where(a => a.AlertedAt is null))
             {
+                if (absentLastClass is not null && !absentLastClass.Contains(row.StudentId)) continue;
                 var st = students[row.StudentId];
                 try
                 {

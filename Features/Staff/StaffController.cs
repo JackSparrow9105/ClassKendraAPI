@@ -2,6 +2,7 @@ using ClassKendraAPI.Common;
 using ClassKendraAPI.Data;
 using ClassKendraAPI.Data.Entities;
 using ClassKendraAPI.Features.Messages;
+using ClassKendraAPI.Features.Subscriptions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -22,7 +23,7 @@ public record StaffInput(string Name, string Phone, string Role, string[]? Batch
 [Route("api/v1/staff")]
 [Authorize(Roles = "Owner")]
 public class StaffController(ClassKendraContext db, CurrentUser current, MessageService messages,
-                             ILogger<StaffController> log) : ControllerBase
+                             PlanService plans, ILogger<StaffController> log) : ControllerBase
 {
     private static readonly string[] Roles = ["Staff", "Teacher"];
 
@@ -42,6 +43,8 @@ public class StaffController(ClassKendraContext db, CurrentUser current, Message
     public async Task<ActionResult<StaffDto>> Create(StaffInput input, CancellationToken ct)
     {
         if (current.TenantId is not Guid tenantId) return BadRequest(new { message = "Set up your centre first." });
+        if (await plans.IsFreeAsync(ct))
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "The Free plan has the owner login only. Choose a plan to add office staff and teachers.", freePlan = true });
         var (phone, batches, error) = await Validate(input, ct);
         if (error is not null) return BadRequest(new { message = error });
 

@@ -39,9 +39,12 @@ public record AuthResponse(string Token, AuthUserDto User, string? DeviceToken);
 [Route("api/v1/auth")]
 [SkipPlanCheck]
 public class AuthController(ClassKendraContext db, OtpService otp, TokenService tokens, CurrentUser current,
-                            FirebaseTokenValidator firebase, PinService pins) : ControllerBase
+                            FirebaseTokenValidator firebase, PinService pins, IServiceScopeFactory scopes) : ControllerBase
 {
-    /// <summary>POST /auth/otp { phone } — sends a 6-digit code.</summary>
+    /// <summary>
+    /// POST /auth/otp { phone } — sends a 6-digit code.
+    /// 204 normally. In demo mode (Otp:ShowOnScreen = true): 200 { demoCode } and nothing is sent.
+    /// </summary>
     [HttpPost("otp")]
     [EnableRateLimiting("otp")]
     public async Task<IActionResult> RequestOtp(OtpRequest request, CancellationToken ct)
@@ -50,13 +53,13 @@ public class AuthController(ClassKendraContext db, OtpService otp, TokenService 
         if (phone is null)
             return BadRequest(new { message = "Enter a valid 10-digit mobile number." });
 
-        var result = await otp.SendAsync(phone, ct);
-        if (result == OtpSendResult.TooManyRequests)
+        var outcome = await otp.SendAsync(phone, ct);
+        if (outcome.Result == OtpSendResult.TooManyRequests)
             return StatusCode(429, new { message = "Too many codes requested. Please wait a few minutes and try again." });
-        if (result == OtpSendResult.Failed)
+        if (outcome.Result == OtpSendResult.Failed)
             return StatusCode(502, new { message = "We couldn't send the code on WhatsApp. Please try again." });
 
-        return NoContent();
+        return outcome.ScreenCode is { } demoCode ? Ok(new { demoCode }) : NoContent();
     }
 
     /// <summary>POST /auth/verify { phone, code } -> { token, user, deviceToken }</summary>
@@ -232,6 +235,16 @@ public class AuthController(ClassKendraContext db, OtpService otp, TokenService 
         }
         else
         {
+            // The Free plan has the owner login only: office staff and teachers can't sign in.
+            if (user.Role != "Owner" && user.TenantId is Guid tenantId)
+            {
+                var free = false;
+                await TenantScope.RunAsync(scopes, tenantId, async sp =>
+                    { free = await sp.GetRequiredService<PlanService>().IsFreeAsync(ct); });
+                if (free)
+                    return StatusCode(StatusCodes.Status403Forbidden, new { message = PlanService.FreeOwnerOnlyMessage, freePlan = true });
+            }
+
             await pins.PruneAsync(user.Id, ct);
         }
 

@@ -15,7 +15,8 @@ public record CentreDto(
     string Id, string Name, string OwnerName, string City, string InstitutionType,
     string[] Subjects, string SizeBand, string Plan, string TrialEndsOn,
     int MessagesUsed, int MessageLimit, bool SetupComplete, string MessageLanguage,
-    string Address, string Phone, string? LogoId);
+    string Address, string Phone, string? LogoId,
+    bool SendReceipts, string AbsentAlerts);
 
 /// <param name="Address">Optional. Null = leave as it is (older app versions don't send it); "" = clear.</param>
 /// <param name="Phone">Optional, same rule as Address.</param>
@@ -24,12 +25,14 @@ public record CentreInput(
     string? SizeBand, string InstitutionType, string? Address = null, string? Phone = null);
 
 public record LanguageInput(string Language);
+/// <param name="AbsentAlerts">"Every", "TwoDays" or "Off".</param>
+public record MessageSettingsInput(bool SendReceipts, string AbsentAlerts);
 
 [ApiController]
 [Route("api/v1/centre")]
 [Authorize]
 [SkipPlanCheck]
-public class CentreController(ClassKendraContext db, CurrentUser current) : ControllerBase
+public class CentreController(ClassKendraContext db, CurrentUser current, PlanService plans) : ControllerBase
 {
     private const int TrialDays = 30;
     private const int TrialMessageLimit = 500;
@@ -38,6 +41,8 @@ public class CentreController(ClassKendraContext db, CurrentUser current) : Cont
     [HttpGet]
     public async Task<ActionResult<CentreDto?>> Get(CancellationToken ct)
     {
+        // Moves a tuition centre whose trial has ended onto the Free plan before we read it.
+        if (current.TenantId is not null) await plans.GetAsync(ct);
         var tenant = await db.Tenants.FirstOrDefaultAsync(ct);   // filter = only my centre
         return tenant is null ? Ok(null) : ToDto(tenant);
     }
@@ -114,6 +119,28 @@ public class CentreController(ClassKendraContext db, CurrentUser current) : Cont
         if (tenant is null) return NotFound(new { message = "Set up your centre first." });
 
         tenant.MessageLanguage = input.Language;
+        tenant.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return ToDto(tenant);
+    }
+
+    /// <summary>
+    /// PUT /centre/message-settings { sendReceipts, absentAlerts }
+    /// Which WhatsApp messages go to parents: payment receipts on/off, and absent alerts
+    /// for every absence, only after 2 classes in a row, or off.
+    /// </summary>
+    [HttpPut("message-settings")]
+    [Authorize(Roles = "Owner")]
+    public async Task<ActionResult<CentreDto>> SetMessageSettings(MessageSettingsInput input, CancellationToken ct)
+    {
+        if (!AbsentAlertModes.IsValid(input.AbsentAlerts))
+            return BadRequest(new { message = "Choose when to send absent alerts." });
+
+        var tenant = await db.Tenants.FirstOrDefaultAsync(ct);
+        if (tenant is null) return NotFound(new { message = "Set up your centre first." });
+
+        tenant.SendReceipts = input.SendReceipts;
+        tenant.AbsentAlerts = input.AbsentAlerts;
         tenant.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return ToDto(tenant);
@@ -237,7 +264,8 @@ public class CentreController(ClassKendraContext db, CurrentUser current) : Cont
         ReadSubjects(t.Subjects), t.SizeBand ?? "", t.PlanCode,
         t.TrialEndsOn.ToString("yyyy-MM-dd"),
         t.MessagesUsed, t.MessageLimit, t.SetupComplete, t.MessageLanguage,
-        t.Address ?? "", t.Phone ?? "", t.LogoId?.ToString());
+        t.Address ?? "", t.Phone ?? "", t.LogoId?.ToString(),
+        t.SendReceipts, t.AbsentAlerts ?? AbsentAlertModes.Every);
 
     private static string[] ReadSubjects(string? json)
     {

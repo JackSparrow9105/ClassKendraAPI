@@ -98,9 +98,10 @@ public class PaymentsController(
         db.ChangeTracker.Clear();
         var view = (await Get(paymentId, ct)).Value!;
 
+        // SendReceipt: true = send, false = don't, missing = the centre's setting.
         if (input.SendReceipt != false)
         {
-            try { await messages.QueueReceiptAsync(view, ct); }
+            try { await messages.QueueReceiptAsync(view, ct, force: input.SendReceipt == true); }
             catch (Exception ex) { log.LogWarning(ex, "Receipt message not queued for {Payment}", paymentId); }
         }
         return view;

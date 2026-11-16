@@ -37,12 +37,15 @@ public class PublicPayController(
     FeeReadService views, ILogger<PublicPayController> log) : ControllerBase
 {
     private const string Invalid = "This payment link is not valid. Please ask the school for a new one.";
+    /// <summary>Centres on the Free plan have no online payment link.</summary>
+    private const string NoOnlinePayment = "Online payment is not available for this centre. Please pay the fees at the centre.";
 
     [HttpGet]
     public async Task<ActionResult<ParentPayPage>> Get(string token, CancellationToken ct)
     {
         var student = await FindStudent(token, ct);
         if (student is null) return NotFound(new { message = Invalid });
+        if (student.Tenant.PlanCode == PlanStates.FreePlanCode) return NotFound(new { message = NoOnlinePayment });
 
         var today = Clock.Today;
         var dues = (await UnpaidDues(student.Id, ct))
@@ -59,6 +62,7 @@ public class PublicPayController(
     {
         var student = await FindStudent(token, ct);
         if (student is null) return NotFound(new { message = Invalid });
+        if (student.Tenant.PlanCode == PlanStates.FreePlanCode) return BadRequest(new { message = NoOnlinePayment });
         if (!razorpay.IsConfigured)
             return BadRequest(new { message = "Online payment is not available yet. Please pay at the school." });
 

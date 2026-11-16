@@ -4,6 +4,7 @@ using ClassKendraAPI.Common;
 using ClassKendraAPI.Data;
 using ClassKendraAPI.Data.Entities;
 using ClassKendraAPI.Features.Fees;
+using ClassKendraAPI.Features.Subscriptions;
 using Microsoft.EntityFrameworkCore;
 
 namespace ClassKendraAPI.Features.Messages;
@@ -37,9 +38,15 @@ public static class MessageStatus
 ///   payment_receipt       en: centre, amount, student, receipt no       hi: centre, student, amount, receipt no
 ///   payment_receipt_due   same as payment_receipt + balance
 ///   staff_invite          (English only) name, centre, link
+///
+/// Free plan (tuition / coaching after the trial): the same templates with "_free" at the end of the name.
+/// They end with the footer "Powered by ClassKendra", and fee_reminder_free has no payment link
+/// (parameters: the same as fee_reminder without the link; text ends "Please pay at the centre.").
 /// </summary>
-public class MessageService(ClassKendraContext db, CurrentUser current, IConfiguration config)
+public class MessageService(ClassKendraContext db, CurrentUser current, IConfiguration config, PlanService plans)
 {
+    public const string FreeFooter = "Powered by ClassKendra";
+
     private (string Name, string Lang)? _centre;
 
     public async Task<(int Used, int Limit)> UsageAsync(CancellationToken ct)
@@ -49,8 +56,21 @@ public class MessageService(ClassKendraContext db, CurrentUser current, IConfigu
         return (t.MessagesUsed, t.MessageLimit);
     }
 
-    public async Task<bool> QueueReceiptAsync(PaymentView p, CancellationToken ct)
+    /// <summary>The centre's message settings (receipts on/off, absent alert rule).</summary>
+    public async Task<(bool SendReceipts, string AbsentAlerts)> SettingsAsync(CancellationToken ct)
     {
+        var t = await db.Tenants.AsNoTracking().Select(x => new { x.SendReceipts, x.AbsentAlerts }).FirstAsync(ct);
+        return (t.SendReceipts, t.AbsentAlerts ?? AbsentAlertModes.Every);
+    }
+
+    /// <summary>
+    /// WhatsApp receipt to the parent. Skipped when the centre has turned receipts off,
+    /// unless force is true (the staff member ticked "send receipt" for this payment).
+    /// </summary>
+    public async Task<bool> QueueReceiptAsync(PaymentView p, CancellationToken ct, bool force = false)
+    {
+        if (!force && !(await SettingsAsync(ct)).SendReceipts) return false;
+
         var (org, lang) = await Centre(ct);
         var amount = Money.Inr(p.Amount);
         var balance = p.BalanceAfter > 0 ? Money.Inr(p.BalanceAfter) : null;
@@ -77,6 +97,17 @@ public class MessageService(ClassKendraContext db, CurrentUser current, IConfigu
             ? (lang == "hi" ? $"{late} दिन देर" : $"{late} days late")
             : (lang == "hi" ? $"देय {due}" : $"due {due}");
         var amt = Money.Inr(amount);
+
+        // Free plan: no online payment link — parents pay at the centre.
+        if (await plans.IsFreeAsync(ct))
+        {
+            var freeText = lang == "hi"
+                ? $"नमस्ते! {org} में {studentName} की {amt} फीस बाकी है ({dueText})। कृपया सेंटर पर भुगतान करें।"
+                : $"Namaste! {studentName}'s fees of {amt} at {org} are due ({dueText}). Please pay at the centre.";
+            string[] freeArgs = lang == "hi" ? [org, studentName, amt, dueText] : [studentName, amt, org, dueText];
+            return await QueueAsync(studentId, Recipient(parentName, studentName), phone, MessageTypes.FeeReminder,
+                "fee_reminder", freeArgs, freeText, lang, ct);
+        }
 
         var text = lang == "hi"
             ? $"नमस्ते! {org} में {studentName} की {amt} फीस बाकी है ({dueText})। यहाँ भुगतान करें: {payLink}"
@@ -135,6 +166,13 @@ public class MessageService(ClassKendraContext db, CurrentUser current, IConfigu
     {
         if (current.TenantId is not Guid tenantId) return false;
         if (Phone.Normalise(phone) is not { } to) return false;
+
+        // Free plan: "_free" templates, which end with the "Powered by ClassKendra" footer.
+        if (await plans.IsFreeAsync(ct))
+        {
+            template += "_free";
+            text += $"\n\n{FreeFooter}";
+        }
 
         await ResetMonthIfNeeded(ct);
         if (!await CountOne(ct)) return false;

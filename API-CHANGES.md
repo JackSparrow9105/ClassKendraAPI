@@ -98,3 +98,37 @@ Email:Host, Email:Port (587), Email:User, Email:Password, Email:From, Email:From
 ```
 Brevo: Host smtp-relay.brevo.com, Port 587, User = the SMTP login shown in Brevo, Password = an SMTP key,
 From = a sender address verified in Brevo. Gmail: smtp.gmail.com, 587, your Gmail + an app password.
+
+## Demo login codes on screen + new plans (2026-11-16)
+
+### Login code on screen (demo mode)
+`Otp:ShowOnScreen = true` (on in appsettings.json for now): `POST /auth/otp` returns **200 `{ demoCode }`**
+instead of 204, and nothing is sent on WhatsApp. The code is still saved (hashed) in `OtpCodes` and checked by
+`POST /auth/verify` exactly as before. The app shows it on the OTP screen with a "Use this code" button.
+**Anyone can sign in to any number while this is on** — set it to `false` (Azure App Setting `Otp__ShowOnScreen`)
+before real customers use the app.
+
+### New plans
+Database: run `Database/2026-11-16-new-plans.sql` once.
+- Tuition & coaching: Free (25 students, 100 messages, ₹0) · TuitionLite ₹399 · Starter ₹799 · Growth ₹1,999 · Pro ₹3,499
+- Schools: School100 ₹749 · School200 ₹999 · School300 ₹1,299 · School500 ₹1,899 · School1000 ₹2,999
+- Old School / SchoolPlus / SchoolMax are switched off (IsActive = 0), not deleted.
+- `GET billing/plans` now also returns `maxStudents` (for the price per student). The Free plan can't be bought.
+
+### Free plan rules (tuition / coaching only)
+- When a coaching centre's trial or paid plan ends (+3 grace days) it moves to **Free** instead of becoming read-only:
+  `Tenants.PlanCode = 'Free'`, `MessageLimit` = the Free plan's limit. Schools still become read-only.
+- **Owner login only:** staff and teachers can't sign in (403 `{ message, freePlan: true }`), every API call by them gets 403,
+  and the owner can't add staff.
+- **Up to 25 students:** with more, changes get 402 (removing students is still allowed).
+- **No UPI payment link:** `GET/POST public/pay/{token}` say online payment isn't available; fee reminders have no link.
+- **"Powered by ClassKendra":** messages use templates named `<template>_free` (fee_reminder_free has no link
+  parameter) and the saved text ends with the footer. Create these in Meta when WhatsApp goes live.
+
+### WhatsApp message settings per centre
+Database: run `Database/2026-11-16-message-settings.sql` once (adds `Tenants.SendReceipts`, `Tenants.AbsentAlerts`).
+- `PUT centre/message-settings { sendReceipts, absentAlerts }` (owner). `Centre` now has `sendReceipts` and `absentAlerts`.
+- Receipts: sent after every payment when `SendReceipts` is on. `POST payments` `sendReceipt: true/false` still overrides it;
+  missing = the setting. Online (parent) payments follow the setting.
+- Absent alerts: `Every` (each absence) · `TwoDays` (only when the student was also absent at the batch's previous class) · `Off`.
+- Fee reminder timing is unchanged: FeeSettings RemindBefore / RemindOnDue / RemindAfter (Fees › settings in the app).

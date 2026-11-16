@@ -8,8 +8,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ClassKendraAPI.Features.Subscriptions;
 
-// Matches Plan in models.ts.
-public record PlanDto(string Code, string Name, string Students, int Monthly, int Yearly, int Messages, bool? Popular);
+// Matches Plan in models.ts. MaxStudents lets the app show the price per student; Monthly 0 = the Free plan.
+public record PlanDto(string Code, string Name, string Students, int Monthly, int Yearly, int Messages, bool? Popular,
+    int MaxStudents);
 public record CheckoutInput(string Plan, string Cycle);
 public record CheckoutResponse(string PaymentUrl);
 
@@ -34,7 +35,7 @@ public class BillingController(ClassKendraContext db, CurrentUser current, Razor
             .Where(p => p.IsActive && p.Code != "Trial" && p.InstitutionType == type)
             .OrderBy(p => p.SortOrder)
             .Select(p => new PlanDto(p.Code, p.Name, p.StudentsLabel, p.MonthlyPrice, p.YearlyPrice, p.MessageLimit,
-                p.IsPopular ? true : null))
+                p.IsPopular ? true : null, p.MaxStudents))
             .ToListAsync(ct);
     }
 
@@ -50,6 +51,7 @@ public class BillingController(ClassKendraContext db, CurrentUser current, Razor
 
         var plan = await db.Plans.AsNoTracking().FirstOrDefaultAsync(p => p.Code == input.Plan && p.IsActive, ct);
         if (plan is null || plan.Code == "Trial") return BadRequest(new { message = "That plan is not available." });
+        if (plan.MonthlyPrice <= 0) return BadRequest(new { message = "The Free plan needs no payment. Your centre moves to it by itself when the trial ends." });
 
         var students = await db.Students.CountAsync(s => s.IsActive, ct);
         if (plan.MaxStudents > 0 && students > plan.MaxStudents)
