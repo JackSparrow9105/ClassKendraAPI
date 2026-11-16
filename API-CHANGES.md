@@ -132,3 +132,15 @@ Database: run `Database/2026-11-16-message-settings.sql` once (adds `Tenants.Sen
   missing = the setting. Online (parent) payments follow the setting.
 - Absent alerts: `Every` (each absence) · `TwoDays` (only when the student was also absent at the batch's previous class) · `Off`.
 - Fee reminder timing is unchanged: FeeSettings RemindBefore / RemindOnDue / RemindAfter (Fees › settings in the app).
+
+### Admissions
+Database: run `Database/2026-11-16-admissions.sql` once (Students.AdmissionNo, AdmissionSequences,
+Tenants.SendAdmissionMessages, 'Admission' message type; numbers existing students too).
+- `POST students` gives the student an admission number (`A-2026-0045`, per session, safe with two at once) and,
+  after this month's bills are raised, queues a WhatsApp **admission confirmation** with the fees due now.
+  Body `sendConfirmation: false` skips the message for that student. Response adds `admissionNo` and `admissionMessageSent`.
+- `POST students/import` numbers imported students but sends no confirmations.
+- `POST students/{id}/admission-message` sends the confirmation again (even when turned off) → `{ sent }`.
+- `Student` has `admissionNo`; `Centre` has `sendAdmissionMessages`; `PUT centre/message-settings` takes it (optional).
+- Template `admission_confirmation` (en + hi), parameters: centre, student, batch/class, admission no, fees text
+  ("Fees due: ₹2,500 by 10/12" / "Welcome aboard!"). Free plan: `admission_confirmation_free`.

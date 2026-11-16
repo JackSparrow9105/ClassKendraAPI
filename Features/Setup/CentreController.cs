@@ -16,7 +16,7 @@ public record CentreDto(
     string[] Subjects, string SizeBand, string Plan, string TrialEndsOn,
     int MessagesUsed, int MessageLimit, bool SetupComplete, string MessageLanguage,
     string Address, string Phone, string? LogoId,
-    bool SendReceipts, string AbsentAlerts);
+    bool SendReceipts, string AbsentAlerts, bool SendAdmissionMessages);
 
 /// <param name="Address">Optional. Null = leave as it is (older app versions don't send it); "" = clear.</param>
 /// <param name="Phone">Optional, same rule as Address.</param>
@@ -26,7 +26,8 @@ public record CentreInput(
 
 public record LanguageInput(string Language);
 /// <param name="AbsentAlerts">"Every", "TwoDays" or "Off".</param>
-public record MessageSettingsInput(bool SendReceipts, string AbsentAlerts);
+/// <param name="SendAdmissionMessages">Null = leave as it is (older app versions don't send it).</param>
+public record MessageSettingsInput(bool SendReceipts, string AbsentAlerts, bool? SendAdmissionMessages = null);
 
 [ApiController]
 [Route("api/v1/centre")]
@@ -141,6 +142,7 @@ public class CentreController(ClassKendraContext db, CurrentUser current, PlanSe
 
         tenant.SendReceipts = input.SendReceipts;
         tenant.AbsentAlerts = input.AbsentAlerts;
+        if (input.SendAdmissionMessages is bool admissions) tenant.SendAdmissionMessages = admissions;
         tenant.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return ToDto(tenant);
@@ -265,7 +267,7 @@ public class CentreController(ClassKendraContext db, CurrentUser current, PlanSe
         t.TrialEndsOn.ToString("yyyy-MM-dd"),
         t.MessagesUsed, t.MessageLimit, t.SetupComplete, t.MessageLanguage,
         t.Address ?? "", t.Phone ?? "", t.LogoId?.ToString(),
-        t.SendReceipts, t.AbsentAlerts ?? AbsentAlertModes.Every);
+        t.SendReceipts, t.AbsentAlerts ?? AbsentAlertModes.Every, t.SendAdmissionMessages);
 
     private static string[] ReadSubjects(string? json)
     {

@@ -15,6 +15,7 @@ public static class MessageTypes
     public const string AbsentAlert = "AbsentAlert";
     public const string Receipt = "Receipt";
     public const string StaffInvite = "StaffInvite";
+    public const string Admission = "Admission";
 }
 
 public static class MessageStatus
@@ -38,6 +39,7 @@ public static class MessageStatus
 ///   payment_receipt       en: centre, amount, student, receipt no       hi: centre, student, amount, receipt no
 ///   payment_receipt_due   same as payment_receipt + balance
 ///   staff_invite          (English only) name, centre, link
+///   admission_confirmation en: centre, student, batch, admission no, fees text   hi: centre, student, batch, admission no, fees text
 ///
 /// Free plan (tuition / coaching after the trial): the same templates with "_free" at the end of the name.
 /// They end with the footer "Powered by ClassKendra", and fee_reminder_free has no payment link
@@ -130,6 +132,38 @@ public class MessageService(ClassKendraContext db, CurrentUser current, IConfigu
 
         return await QueueAsync(studentId, Recipient(parentName, studentName), phone, MessageTypes.AbsentAlert,
             "absent_alert", args, text, lang, ct);
+    }
+
+    /// <summary>
+    /// "Welcome to Vidya Coaching! Aarav's admission in Class 10 · Maths is confirmed. Admission no. A-2026-0045. ..."
+    /// Skipped when the centre turned admission messages off, unless force is true (the "send again" button).
+    /// feesText: what to pay now, already in the message language ("Fees due: ₹2,500 by 10/12"), or "" when nothing is due.
+    /// </summary>
+    public async Task<bool> QueueAdmissionAsync(Guid studentId, string studentName, string parentName, string phone,
+        string batchName, string admissionNo, string feesText, bool force, CancellationToken ct)
+    {
+        if (!force && !await db.Tenants.AsNoTracking().Select(t => t.SendAdmissionMessages).FirstAsync(ct)) return false;
+        var (org, lang) = await Centre(ct);
+        var fees = string.IsNullOrWhiteSpace(feesText) ? (lang == "hi" ? "स्वागत है!" : "Welcome aboard!") : feesText;
+        var text = lang == "hi"
+            ? $"{org} में आपका स्वागत है! {studentName} का {batchName} में एडमिशन पक्का हो गया है। एडमिशन नंबर {admissionNo}। {fees}"
+            : $"Welcome to {org}! {studentName}'s admission in {batchName} is confirmed. Admission no. {admissionNo}. {fees}";
+        string[] args = [org, studentName, batchName, admissionNo, fees];
+        return await QueueAsync(studentId, Recipient(parentName, studentName), phone, MessageTypes.Admission,
+            "admission_confirmation", args, text, lang, ct);
+    }
+
+    /// <summary>"Fees due: ₹2,500 by 10/12" in the centre's message language.</summary>
+    public async Task<string> FeesDueTextAsync(int amount, DateOnly? dueDate, CancellationToken ct)
+    {
+        if (amount <= 0) return "";
+        var (_, lang) = await Centre(ct);
+        var amt = Money.Inr(amount);
+        // A due date already passed (joined mid-month) reads as "due now", not a date in the past.
+        var by = dueDate is DateOnly d && d > Clock.Today ? $"{d.Day:D2}/{d.Month:D2}" : null;
+        return lang == "hi"
+            ? (by is null ? $"फीस: {amt}, अभी जमा करें।" : $"फीस: {amt}, {by} तक।")
+            : (by is null ? $"Fees due now: {amt}." : $"Fees due: {amt} by {by}.");
     }
 
     public async Task<bool> QueueStaffInviteAsync(string name, string phone, CancellationToken ct)

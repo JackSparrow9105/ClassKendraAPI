@@ -9,6 +9,9 @@ public partial class Tenant
 
     /// <summary>Absent alerts to parents: "Every" absence, "TwoDays" = only when absent 2 classes in a row, or "Off".</summary>
     public string AbsentAlerts { get; set; } = AbsentAlertModes.Every;
+
+    /// <summary>WhatsApp admission confirmation to the parent when a student is added (Database/2026-11-16-admissions.sql).</summary>
+    public bool SendAdmissionMessages { get; set; } = true;
 }
 
 public static class AbsentAlertModes

@@ -22,7 +22,8 @@ public record PromotionResult(int Moved, int Left, int KeptBack);
 [ApiController]
 [Route("api/v1/students")]
 [Authorize]
-public class StudentToolsController(ClassKendraContext db, CurrentUser current, BillingService billing, PlanService plans) : ControllerBase
+public class StudentToolsController(ClassKendraContext db, CurrentUser current, BillingService billing, PlanService plans,
+                                    AdmissionService admissions) : ControllerBase
 {
     /// <summary>POST /students/import — rows from the Excel/CSV screen.</summary>
     [HttpPost("import")]
@@ -82,6 +83,8 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
         if (added > 0 && await plans.StudentLimitErrorAsync(added, ct) is { } limit)
             return BadRequest(new { message = limit });
 
+        // Imported students get admission numbers too, but no WhatsApp confirmation (they usually joined long ago).
+        await admissions.AssignNumbersAsync(tenantId, newStudents, ct);
         await db.SaveChangesAsync(ct);
         if (added > 0) await billing.RaiseAsync(newStudents.Select(s => s.Id).ToList(), ct);
         return result with { Added = added };

@@ -43,5 +43,6 @@ public partial class ClassKendraContext
 		ConfigureReceipts(modelBuilder);   // centre address/phone/logo + frozen receipts (ClassKendraContext.Receipt.cs)
 		ConfigureBackupEmail(modelBuilder);   // backup email + EmailCodes (ClassKendraContext.BackupEmail.cs)
 		ConfigureMessageSettings(modelBuilder);   // receipts on/off, absent alert rule (ClassKendraContext.Messages.cs)
+		ConfigureAdmissions(modelBuilder);   // admission numbers + confirmations (ClassKendraContext.Admissions.cs)
 	}
 }

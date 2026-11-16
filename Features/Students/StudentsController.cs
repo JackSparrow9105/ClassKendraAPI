@@ -13,20 +13,25 @@ namespace ClassKendraAPI.Features.Students;
 // ---- Shapes that match models.ts (Student, Concession, StudentInput) ----
 public record ConcessionDto(string Id, string Reason, string Note, string? FeeHeadId, string Kind, int Value);
 
+/// <param name="AdmissionNo">"A-2026-0045"; null for students added before admission numbers.</param>
+/// <param name="AdmissionMessageSent">Only on POST /students: was the WhatsApp admission confirmation queued?</param>
 public record StudentDto(
     string Id, string Name, string ParentName, string ParentPhone, string BatchId,
-    string JoinedOn, bool Active, string[] OptionalHeadIds, ConcessionDto[] Concessions);
+    string JoinedOn, bool Active, string[] OptionalHeadIds, ConcessionDto[] Concessions,
+    string? AdmissionNo = null, bool? AdmissionMessageSent = null);
 
+/// <param name="SendConfirmation">POST only: false = don't send the WhatsApp admission confirmation for this student.</param>
 public record StudentInput(
     string Name, string? ParentName, string ParentPhone, string BatchId,
-    string? JoinedOn, string[]? OptionalHeadIds);
+    string? JoinedOn, string[]? OptionalHeadIds, bool? SendConfirmation = null);
 
 public record ConcessionInput(string Reason, string? Note, string? FeeHeadId, string Kind, int Value);
 
 [ApiController]
 [Route("api/v1/students")]
 [Authorize]
-public class StudentsController(ClassKendraContext db, CurrentUser current, BillingService billing, PlanService plans) : ControllerBase
+public class StudentsController(ClassKendraContext db, CurrentUser current, BillingService billing, PlanService plans,
+                                AdmissionService admissions) : ControllerBase
 {
     private static readonly string[] Reasons = ["Sibling", "Staff child", "Scholarship", "Other"];
 
@@ -81,11 +86,27 @@ public class StudentsController(ClassKendraContext db, CurrentUser current, Bill
         };
         Apply(s, clean!);
         foreach (var head in await LoadOptionalHeads(clean!.OptionalHeadIds, ct)) s.FeeHeads.Add(head);
+        await admissions.AssignNumbersAsync(tenantId, [s], ct);   // "A-2026-0045"
 
         db.Students.Add(s);
         await db.SaveChangesAsync(ct);
         await billing.RaiseAsync([s.Id], ct);   // this month's bills for the new student
-        return ToDto(s);
+
+        // WhatsApp admission confirmation with the fees due now (the centre can turn these off in Settings).
+        var sent = input.SendConfirmation != false && await admissions.SendConfirmationAsync(s.Id, force: false, ct);
+        return ToDto(s) with { AdmissionMessageSent = sent };
+    }
+
+    /// <summary>POST /students/{id}/admission-message — send the admission confirmation again → { sent }.</summary>
+    [HttpPost("{id:guid}/admission-message")]
+    [Authorize(Roles = "Owner,Staff")]
+    public async Task<IActionResult> ResendAdmission(Guid id, CancellationToken ct)
+    {
+        var exists = await db.Students.AnyAsync(s => s.Id == id && s.AdmissionNo != null, ct);
+        if (!exists) return NotFound(new { message = "This student has no admission number." });
+        var sent = await admissions.SendConfirmationAsync(id, force: true, ct);
+        return sent ? Ok(new { sent })
+                    : BadRequest(new { message = "Couldn't send it. This month's WhatsApp messages may be used up." });
     }
 
     /// <summary>PUT /students/{id} — opting out of an optional fee cancels its unpaid bills.</summary>
@@ -262,5 +283,6 @@ public class StudentsController(ClassKendraContext db, CurrentUser current, Bill
         s.FeeHeads.Select(h => h.Id.ToString()).ToArray(),
         s.StudentConcessions.OrderBy(c => c.CreatedAt)
             .Select(c => new ConcessionDto(c.Id.ToString(), c.Reason, c.Note, c.FeeHeadId?.ToString(), c.Kind, c.Value))
-            .ToArray());
+            .ToArray(),
+        s.AdmissionNo);
 }
