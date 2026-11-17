@@ -25,10 +25,14 @@ public record BillPeriod(string Key, string Label);
 /// Same rules as the Angular app (core/fees/schedule.ts and core/fees/concessions.ts):
 ///
 ///  Monthly     every month
-///  Quarterly   session start month, +3, +6, +9 — or the month a student joins
-///  HalfYearly  session start month and +6 — or the month a student joins
-///  Yearly      session start month — or the month a student joins
-///  OneTime     only in the month the student joins (existing students are never charged)
+///  Quarterly   session start month, +3, +6, +9 — or the month a new admission joins
+///  HalfYearly  session start month and +6 — or the month a new admission joins
+///  Yearly      session start month — or the month a new admission joins
+///  OneTime     only in the month a new admission joins (the admission fee is one of these)
+///
+/// "New admission" = admitted through ClassKendra. Existing students (already studying when the centre
+/// started using ClassKendra, and every Excel import) follow the regular schedule only: no one-time fees,
+/// and no catch-up quarterly/term/yearly bill for the month they were added — they paid those already.
 ///
 /// - Bills are raised for the current month. Running it twice never creates duplicates:
 ///   (student, fee head, period) is unique in the database. Earlier months are not back-filled.
@@ -78,7 +82,7 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
 
         var studentsQ = db.Students.AsNoTracking().Where(s => s.IsActive && s.JoinedOn <= monthEnd);
         if (studentIds is { Count: > 0 }) studentsQ = studentsQ.Where(s => studentIds.Contains(s.Id));
-        var students = await studentsQ.Select(s => new { s.Id, s.BatchId, s.JoinedOn }).ToListAsync(ct);
+        var students = await studentsQ.Select(s => new { s.Id, s.BatchId, s.JoinedOn, s.IsNewAdmission }).ToListAsync(ct);
         if (students.Count == 0) return 0;
         var ids = students.Select(s => s.Id).ToList();
 
@@ -115,7 +119,7 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
                 var gross = head.FeeHeadAmounts.FirstOrDefault(a => a.BatchId == st.BatchId)?.Amount ?? 0;
                 if (gross <= 0) continue;
                 if (head.IsOptional && !optedIn.Contains((st.Id, head.Id))) continue;
-                if (!IsDueIn(head.Frequency, monthStart, sessionStart, st.JoinedOn)) continue;
+                if (!IsDueIn(head.Frequency, monthStart, sessionStart, st.JoinedOn, st.IsNewAdmission)) continue;
 
                 var period = periodByHead[head.Id];
                 var discount = Discount(gross, concessions[st.Id], head.Id);
@@ -201,12 +205,12 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
     }
 
     /// <summary>Does a fee with this frequency fall due in this month for a student who joined on joinedOn?</summary>
-    public static bool IsDueIn(string frequency, DateOnly month, int sessionStartMonth, DateOnly joinedOn)
+    public static bool IsDueIn(string frequency, DateOnly month, int sessionStartMonth, DateOnly joinedOn, bool isNewAdmission)
     {
         var joinedMonth = new DateOnly(joinedOn.Year, joinedOn.Month, 1);
         if (month < joinedMonth) return false;
         var off = (month.Month - sessionStartMonth + 12) % 12;
-        var joinedThisMonth = month == joinedMonth;
+        var joinedThisMonth = isNewAdmission && month == joinedMonth;
         return frequency switch
         {
             "Monthly" => true,

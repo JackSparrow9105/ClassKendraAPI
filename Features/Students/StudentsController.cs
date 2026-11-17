@@ -13,17 +13,22 @@ namespace ClassKendraAPI.Features.Students;
 // ---- Shapes that match models.ts (Student, Concession, StudentInput) ----
 public record ConcessionDto(string Id, string Reason, string Note, string? FeeHeadId, string Kind, int Value);
 
-/// <param name="AdmissionNo">"A-2026-0045"; null for students added before admission numbers.</param>
+/// <param name="AdmissionNo">"A-2026-0045", "1251" or the school's own register number.</param>
 /// <param name="AdmissionMessageSent">Only on POST /students: was the WhatsApp admission confirmation queued?</param>
+/// <param name="IsNewAdmission">true = admitted through ClassKendra; false = was already studying here.</param>
 public record StudentDto(
     string Id, string Name, string ParentName, string ParentPhone, string BatchId,
     string JoinedOn, bool Active, string[] OptionalHeadIds, ConcessionDto[] Concessions,
-    string? AdmissionNo = null, bool? AdmissionMessageSent = null);
+    string? AdmissionNo = null, bool? AdmissionMessageSent = null, bool IsNewAdmission = false);
 
 /// <param name="SendConfirmation">POST only: false = don't send the WhatsApp admission confirmation for this student.</param>
+/// <param name="AdmissionNo">Typed from the register. Empty on POST = made automatically; empty on PUT = unchanged.</param>
+/// <param name="IsNewAdmission">POST: default true. false = existing student (no admission fee, one-time fees or WhatsApp).</param>
+/// <param name="WaiveAdmissionFee">POST, new admissions only: don't charge this student the admission fee.</param>
 public record StudentInput(
     string Name, string? ParentName, string ParentPhone, string BatchId,
-    string? JoinedOn, string[]? OptionalHeadIds, bool? SendConfirmation = null);
+    string? JoinedOn, string[]? OptionalHeadIds, bool? SendConfirmation = null,
+    string? AdmissionNo = null, bool? IsNewAdmission = null, bool? WaiveAdmissionFee = null);
 
 public record ConcessionInput(string Reason, string? Note, string? FeeHeadId, string Kind, int Value);
 
@@ -84,17 +89,24 @@ public class StudentsController(ClassKendraContext db, CurrentUser current, Bill
             IsActive = true,
             CreatedAt = DateTime.UtcNow
         };
+        var (typedNo, noError) = await admissions.CheckTypedAsync(input.AdmissionNo, null, ct);
+        if (noError is not null) return BadRequest(new { message = noError });
+
         Apply(s, clean!);
+        s.IsNewAdmission = input.IsNewAdmission ?? true;
+        s.AdmissionNo = typedNo;
         foreach (var head in await LoadOptionalHeads(clean!.OptionalHeadIds, ct)) s.FeeHeads.Add(head);
-        await admissions.AssignNumbersAsync(tenantId, [s], ct);   // "A-2026-0045"
+        await admissions.AssignNumbersAsync(tenantId, [s], ct);   // only if none was typed
+        if (s.IsNewAdmission && input.WaiveAdmissionFee == true) await admissions.WaiveAdmissionFeeAsync(s, ct);
 
         db.Students.Add(s);
         await db.SaveChangesAsync(ct);
-        await billing.RaiseAsync([s.Id], ct);   // this month's bills for the new student
+        await billing.RaiseAsync([s.Id], ct);   // this month's bills (admission fee only for new admissions)
 
-        // WhatsApp admission confirmation with the fees due now (the centre can turn these off in Settings).
-        var sent = input.SendConfirmation != false && await admissions.SendConfirmationAsync(s.Id, force: false, ct);
-        return ToDto(s) with { AdmissionMessageSent = sent };
+        // New admissions: WhatsApp admission confirmation with the fees due now (the centre can turn these off).
+        var sent = s.IsNewAdmission && input.SendConfirmation != false
+                   && await admissions.SendConfirmationAsync(s.Id, force: false, ct);
+        return ToDto(s) with { AdmissionMessageSent = s.IsNewAdmission ? sent : null };
     }
 
     /// <summary>POST /students/{id}/admission-message — send the admission confirmation again → { sent }.</summary>
@@ -102,8 +114,8 @@ public class StudentsController(ClassKendraContext db, CurrentUser current, Bill
     [Authorize(Roles = "Owner,Staff")]
     public async Task<IActionResult> ResendAdmission(Guid id, CancellationToken ct)
     {
-        var exists = await db.Students.AnyAsync(s => s.Id == id && s.AdmissionNo != null, ct);
-        if (!exists) return NotFound(new { message = "This student has no admission number." });
+        var exists = await db.Students.AnyAsync(s => s.Id == id && s.AdmissionNo != null && s.IsNewAdmission, ct);
+        if (!exists) return NotFound(new { message = "Admission confirmations are only for new admissions." });
         var sent = await admissions.SendConfirmationAsync(id, force: true, ct);
         return sent ? Ok(new { sent })
                     : BadRequest(new { message = "Couldn't send it. This month's WhatsApp messages may be used up." });
@@ -120,10 +132,18 @@ public class StudentsController(ClassKendraContext db, CurrentUser current, Bill
         var (clean, error) = await Validate(input, id, ct);
         if (error is not null) return BadRequest(new { message = error });
 
+        var (typedNo, noError) = await admissions.CheckTypedAsync(input.AdmissionNo, id, ct);
+        if (noError is not null) return BadRequest(new { message = noError });
+
         var droppedHeads = s.FeeHeads.Select(h => h.Id).Except(clean!.OptionalHeadIds).ToList();
+        // Marked as an existing student after all: the unpaid admission fee goes too.
+        if (input.IsNewAdmission == false && s.IsNewAdmission && await admissions.AdmissionFeeAsync(ct) is { } admissionFee)
+            droppedHeads.Add(admissionFee.Id);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         Apply(s, clean);
+        if (typedNo is not null) s.AdmissionNo = typedNo;
+        if (input.IsNewAdmission is bool isNew) s.IsNewAdmission = isNew;
         s.FeeHeads.Clear();
         foreach (var head in await LoadOptionalHeads(clean.OptionalHeadIds, ct)) s.FeeHeads.Add(head);
         await db.SaveChangesAsync(ct);
@@ -284,5 +304,5 @@ public class StudentsController(ClassKendraContext db, CurrentUser current, Bill
         s.StudentConcessions.OrderBy(c => c.CreatedAt)
             .Select(c => new ConcessionDto(c.Id.ToString(), c.Reason, c.Note, c.FeeHeadId?.ToString(), c.Kind, c.Value))
             .ToArray(),
-        s.AdmissionNo);
+        s.AdmissionNo, null, s.IsNewAdmission);
 }

@@ -11,7 +11,8 @@ using Microsoft.EntityFrameworkCore;
 namespace ClassKendraAPI.Features.Students;
 
 // ---- Shapes that match models.ts / student.service.ts ----
-public record StudentImportRow(string Name, string ParentPhone, string BatchName);
+/// <param name="AdmissionNo">Optional: the student's number in the school register. Empty = made automatically.</param>
+public record StudentImportRow(string Name, string ParentPhone, string BatchName, string? AdmissionNo = null);
 public record ImportSkip(int Row, string Reason);
 public record ImportResult(int Added, List<ImportSkip> Skipped);
 
@@ -44,6 +45,10 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
             .Select(x => Key(x.Name, x.ParentPhone))
             .ToHashSet();
 
+        // Admission numbers already in use (any student of this centre, active or not).
+        var usedNos = (await db.Students.Where(s => s.AdmissionNo != null).Select(s => s.AdmissionNo!).ToListAsync(ct))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         var result = new ImportResult(0, []);
         var added = 0;
         var newStudents = new List<Student>();
@@ -59,8 +64,14 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
             if (phone is null) { result.Skipped.Add(new(rowNo, "Phone number is not a valid 10-digit mobile")); continue; }
             if (!batchByKey.TryGetValue(Norm(r.BatchName ?? ""), out var batchId))
             { result.Skipped.Add(new(rowNo, $"\"{r.BatchName}\" doesn't match any batch or class")); continue; }
+            var admissionNo = r.AdmissionNo?.Trim() ?? "";
+            if (admissionNo.Length > AdmissionService.MaxLength)
+            { result.Skipped.Add(new(rowNo, $"Admission no. is longer than {AdmissionService.MaxLength} characters")); continue; }
+            if (admissionNo.Length > 0 && usedNos.Contains(admissionNo))
+            { result.Skipped.Add(new(rowNo, $"Admission no. {admissionNo} is already given to another student")); continue; }
             if (!existing.Add(Key(name, phone)))
             { result.Skipped.Add(new(rowNo, "Already added with this number")); continue; }
+            if (admissionNo.Length > 0) usedNos.Add(admissionNo);
 
             var student = new Student
             {
@@ -71,6 +82,8 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
                 BatchId = batchId,
                 JoinedOn = Clock.Today,
                 IsActive = true,
+                IsNewAdmission = false,   // imported = already studying here: no admission fee, no one-time fees
+                AdmissionNo = admissionNo.Length > 0 ? admissionNo : null,
                 PayToken = StudentsController.NewPayToken(),
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow
@@ -83,7 +96,7 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
         if (added > 0 && await plans.StudentLimitErrorAsync(added, ct) is { } limit)
             return BadRequest(new { message = limit });
 
-        // Imported students get admission numbers too, but no WhatsApp confirmation (they usually joined long ago).
+        // Imported students without a number get one too, but no WhatsApp confirmation (they joined long ago).
         await admissions.AssignNumbersAsync(tenantId, newStudents, ct);
         await db.SaveChangesAsync(ct);
         if (added > 0) await billing.RaiseAsync(newStudents.Select(s => s.Id).ToList(), ct);

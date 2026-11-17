@@ -9,7 +9,8 @@ namespace ClassKendraAPI.Features.Fees;
 
 // ---- Shapes that match models.ts (FeeSettings, FeeHead, FeeSetupRequest) ----
 public record FeeSettingsDto(int DueDay, int SessionStartMonth, bool RemindBefore, bool RemindOnDue, bool RemindAfter);
-public record FeeHeadDto(string Id, string Name, string Frequency, bool Optional, Dictionary<string, int> Amounts);
+/// <param name="AdmissionFee">The admission fee: one-time, charged only to new admissions (at most one).</param>
+public record FeeHeadDto(string Id, string Name, string Frequency, bool Optional, Dictionary<string, int> Amounts, bool AdmissionFee = false);
 public record FeeSetupDto(FeeSettingsDto? Settings, List<FeeHeadDto> Heads);
 public record FeeSetupRequest(FeeSettingsDto Settings, List<FeeHeadDto> Heads);
 
@@ -101,8 +102,9 @@ public class FeeSetupController(ClassKendraContext db, CurrentUser current, Bill
             }
 
             head.Name = dto.Name.Trim();
-            head.Frequency = dto.Frequency;
-            head.IsOptional = dto.Optional;
+            head.IsAdmissionFee = dto.AdmissionFee;
+            head.Frequency = dto.AdmissionFee ? "OneTime" : dto.Frequency;   // admission fee: once, everyone admitted pays
+            head.IsOptional = !dto.AdmissionFee && dto.Optional;
             if (!head.IsOptional) head.Students.Clear();   // everyone pays now; the opt-in list isn't needed
 
             // Amounts per batch: update in place, add new, remove dropped or zero.
@@ -141,6 +143,8 @@ public class FeeSetupController(ClassKendraContext db, CurrentUser current, Bill
             if (h.Amounts.Values.Any(v => v < 0)) return $"Amounts for \"{h.Name}\" can't be negative.";
         }
 
+        if (r.Heads.Count(h => h.AdmissionFee) > 1) return "There can be only one admission fee.";
+
         var duplicate = r.Heads.GroupBy(h => h.Name.Trim().ToLowerInvariant()).FirstOrDefault(g => g.Count() > 1);
         return duplicate is null ? null : $"There are two fees called \"{duplicate.First().Name.Trim()}\".";
     }
@@ -158,6 +162,6 @@ public class FeeSetupController(ClassKendraContext db, CurrentUser current, Bill
             s is null ? null : new FeeSettingsDto(s.DueDay, s.SessionStartMonth, s.RemindBefore, s.RemindOnDue, s.RemindAfter),
             heads.Select(h => new FeeHeadDto(
                 h.Id.ToString(), h.Name, h.Frequency, h.IsOptional,
-                h.FeeHeadAmounts.ToDictionary(a => a.BatchId.ToString(), a => a.Amount))).ToList());
+                h.FeeHeadAmounts.ToDictionary(a => a.BatchId.ToString(), a => a.Amount), h.IsAdmissionFee)).ToList());
     }
 }

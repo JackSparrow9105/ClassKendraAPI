@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using ClassKendraAPI.Common;
 using ClassKendraAPI.Data;
 using ClassKendraAPI.Data.Entities;
+using ClassKendraAPI.Features.Students;
 using ClassKendraAPI.Features.Subscriptions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -27,6 +28,7 @@ public record CentreInput(
 public record LanguageInput(string Language);
 /// <param name="AbsentAlerts">"Every", "TwoDays" or "Off".</param>
 /// <param name="SendAdmissionMessages">Null = leave as it is (older app versions don't send it).</param>
+public record AdmissionNumberingInput(string Style, int? NextNumber);
 public record MessageSettingsInput(bool SendReceipts, string AbsentAlerts, bool? SendAdmissionMessages = null);
 
 [ApiController]
@@ -146,6 +148,29 @@ public class CentreController(ClassKendraContext db, CurrentUser current, PlanSe
         tenant.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return ToDto(tenant);
+    }
+
+    // ---------- Admission numbers ----------
+
+    /// <summary>GET /centre/admission-numbering → { style: "Session"|"Serial", nextNumber, example }</summary>
+    [HttpGet("admission-numbering")]
+    [Authorize(Roles = "Owner,Staff")]
+    public async Task<ActionResult<AdmissionNumberingDto>> GetAdmissionNumbering(
+        [FromServices] AdmissionService admissions, CancellationToken ct) =>
+        await admissions.GetNumberingAsync(ct);
+
+    /// <summary>
+    /// PUT /centre/admission-numbering { style, nextNumber? } — "Session" = A-2026-0045, "Serial" = 1251, 1252…
+    /// nextNumber = the number the next new student gets (e.g. 1251 to continue the school register).
+    /// </summary>
+    [HttpPut("admission-numbering")]
+    [Authorize(Roles = "Owner")]
+    public async Task<ActionResult<AdmissionNumberingDto>> SetAdmissionNumbering(
+        AdmissionNumberingInput input, [FromServices] AdmissionService admissions, CancellationToken ct)
+    {
+        if (current.TenantId is not Guid tenantId) return BadRequest(new { message = "Set up your centre first." });
+        var (result, error) = await admissions.SetNumberingAsync(tenantId, input.Style, input.NextNumber, ct);
+        return error is null ? result! : BadRequest(new { message = error });
     }
 
     // ---------- Logo (printed on receipts) ----------

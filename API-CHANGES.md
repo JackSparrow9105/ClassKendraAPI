@@ -144,3 +144,20 @@ Tenants.SendAdmissionMessages, 'Admission' message type; numbers existing studen
 - `Student` has `admissionNo`; `Centre` has `sendAdmissionMessages`; `PUT centre/message-settings` takes it (optional).
 - Template `admission_confirmation` (en + hi), parameters: centre, student, batch/class, admission no, fees text
   ("Fees due: ₹2,500 by 10/12" / "Welcome aboard!"). Free plan: `admission_confirmation_free`.
+
+### New admissions vs existing students, admission fee (17 Nov)
+Database: run `Database/2026-11-17-new-and-existing.sql` once, after the admissions script
+(Students.IsNewAdmission, FeeHeads.IsAdmissionFee, Tenants.AdmissionNoStyle; everyone already in the database = existing).
+- `Student.isNewAdmission`: true = admitted through ClassKendra, false = already studying here (and every Excel import).
+- `POST students` takes `isNewAdmission` (default true), `admissionNo` (typed from the register; empty = automatic)
+  and `waiveAdmissionFee` (new admissions only; saved as a 100% "Other · Admission fee waived" discount on the admission fee).
+  Existing students get no admission fee, no one-time fees, no catch-up quarterly/term/yearly bill and no WhatsApp message.
+- `PUT students/{id}` takes `admissionNo` (empty = unchanged) and `isNewAdmission`
+  (new → existing cancels the unpaid admission fee).
+- Typed admission numbers: up to 20 letters/digits/- / . ; unique per centre ("Admission no. 1250 is already given to …").
+- `POST students/import` rows take an optional `admissionNo`; imported students are existing students.
+- Fee setup: `FeeHead.admissionFee` (at most one; always one-time, everyone admitted pays).
+- `GET centre/admission-numbering` → `{ style: "Session"|"Serial", nextNumber, example }`;
+  `PUT centre/admission-numbering { style, nextNumber? }`. "Serial" continues the school's register (1251, 1252…);
+  without nextNumber it starts after the highest plain number already in use. Automatic numbers skip numbers already taken.
+- Dashboard `insights.newThisMonth` counts new admissions only. Admission confirmations go to new admissions only.

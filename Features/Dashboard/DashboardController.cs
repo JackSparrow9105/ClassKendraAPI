@@ -112,7 +112,7 @@ public class DashboardController(ClassKendraContext db, BillingService billing) 
         int collected, int digital, int overdue, int overdueCount,
         Dictionary<Guid, int> studentsByBatch, Dictionary<Guid, int> absentByBatch, CancellationToken ct)
     {
-        var newThisMonth = await db.Students.CountAsync(s => s.IsActive && s.JoinedOn >= monthStart, ct);
+        var newThisMonth = await db.Students.CountAsync(s => s.IsActive && s.IsNewAdmission && s.JoinedOn >= monthStart, ct);   // new admissions only
 
         // WhatsApp: messages created since the 1st of this month (India time), stored in UTC.
         var monthStartUtc = monthStart.ToDateTime(TimeOnly.MinValue).AddMinutes(-330);
