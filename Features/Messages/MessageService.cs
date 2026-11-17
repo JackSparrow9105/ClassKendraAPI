@@ -16,6 +16,8 @@ public static class MessageTypes
     public const string Receipt = "Receipt";
     public const string StaffInvite = "StaffInvite";
     public const string Admission = "Admission";
+    public const string LeaveRequest = "LeaveRequest";
+    public const string LeaveAnswer = "LeaveAnswer";
 }
 
 public static class MessageStatus
@@ -164,6 +166,36 @@ public class MessageService(ClassKendraContext db, CurrentUser current, IConfigu
         return lang == "hi"
             ? (by is null ? $"फीस: {amt}, अभी जमा करें।" : $"फीस: {amt}, {by} तक।")
             : (by is null ? $"Fees due now: {amt}." : $"Fees due: {amt} by {by}.");
+    }
+
+    /// <summary>WhatsApp to the owner: a teacher applied for leave (only when the school turned on WhatsApp for leave).</summary>
+    public async Task<bool> QueueLeaveRequestAsync(string ownerName, string ownerPhone, string staffName, string dates,
+        int days, string reason, CancellationToken ct)
+    {
+        var (_, lang) = await Centre(ct);
+        var dayText = lang == "hi" ? $"{days} दिन" : days == 1 ? "1 working day" : $"{days} working days";
+        var text = lang == "hi"
+            ? $"{staffName} ने छुट्टी के लिए आवेदन किया है: {dates} ({dayText})। कारण: {reason}। मंज़ूर या नामंज़ूर करने के लिए ClassKendra खोलें।"
+            : $"{staffName} applied for leave: {dates} ({dayText}). Reason: {reason}. Open ClassKendra to approve or reject.";
+        return await QueueAsync(null, ownerName, ownerPhone, MessageTypes.LeaveRequest, "leave_request",
+            [staffName, dates, dayText, reason], text, lang, ct);
+    }
+
+    /// <summary>WhatsApp to the teacher: their leave was approved or rejected.</summary>
+    public async Task<bool> QueueLeaveAnswerAsync(string staffName, string staffPhone, string dates, bool approved,
+        string? rejectReason, CancellationToken ct)
+    {
+        var (org, lang) = await Centre(ct);
+        if (approved)
+        {
+            var ok = lang == "hi" ? $"{dates} की आपकी छुट्टी मंज़ूर हो गई है। — {org}" : $"Your leave for {dates} is approved. — {org}";
+            return await QueueAsync(null, staffName, staffPhone, MessageTypes.LeaveAnswer, "leave_approved", [dates, org], ok, lang, ct);
+        }
+        var why = string.IsNullOrWhiteSpace(rejectReason) ? (lang == "hi" ? "—" : "No reason given") : rejectReason.Trim();
+        var no = lang == "hi"
+            ? $"{dates} की आपकी छुट्टी मंज़ूर नहीं हुई। कारण: {why}। — {org}"
+            : $"Your leave for {dates} is not approved. Reason: {why}. — {org}";
+        return await QueueAsync(null, staffName, staffPhone, MessageTypes.LeaveAnswer, "leave_rejected", [dates, why, org], no, lang, ct);
     }
 
     public async Task<bool> QueueStaffInviteAsync(string name, string phone, CancellationToken ct)

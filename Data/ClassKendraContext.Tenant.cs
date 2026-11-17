@@ -44,5 +44,6 @@ public partial class ClassKendraContext
 		ConfigureBackupEmail(modelBuilder);   // backup email + EmailCodes (ClassKendraContext.BackupEmail.cs)
 		ConfigureMessageSettings(modelBuilder);   // receipts on/off, absent alert rule (ClassKendraContext.Messages.cs)
 		ConfigureAdmissions(modelBuilder);   // admission numbers + confirmations (ClassKendraContext.Admissions.cs)
+		ConfigureStaffAttendance(modelBuilder);   // staff attendance, leave, app notifications (ClassKendraContext.StaffAttendance.cs)
 	}
 }

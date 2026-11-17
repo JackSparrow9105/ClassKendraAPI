@@ -83,7 +83,9 @@ builder.Services.AddScoped<EmailCodeService>();   // backup email codes
 builder.Services.AddScoped<FeeReadService>();
 builder.Services.AddScoped<BillingService>();
 builder.Services.AddScoped<ReminderService>();
-builder.Services.AddScoped<ClassKendraAPI.Features.Students.AdmissionService>();   // admission numbers + WhatsApp confirmation
+builder.Services.AddScoped<ClassKendraAPI.Features.Students.AdmissionService>();
+builder.Services.AddScoped<ClassKendraAPI.Features.StaffAttendance.PushService>();
+builder.Services.AddScoped<ClassKendraAPI.Features.StaffAttendance.StaffAttendanceService>();   // admission numbers + WhatsApp confirmation
 builder.Services.AddScoped<PaymentService>();
 builder.Services.AddScoped<MessageService>();
 builder.Services.AddScoped<PlanService>();

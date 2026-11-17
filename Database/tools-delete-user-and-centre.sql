@@ -86,6 +86,10 @@ BEGIN
     DELETE FROM dbo.ReceiptSequences WHERE TenantId = @TenantId;
     IF OBJECT_ID('dbo.AdmissionSequences') IS NOT NULL
         EXEC sp_executesql N'DELETE FROM dbo.AdmissionSequences WHERE TenantId = @t', N'@t UNIQUEIDENTIFIER', @t = @TenantId;
+    IF OBJECT_ID('dbo.StaffAttendance') IS NOT NULL
+        EXEC sp_executesql N'DELETE FROM dbo.StaffAttendance WHERE TenantId = @t; DELETE FROM dbo.StaffLeaves WHERE TenantId = @t;
+            DELETE FROM dbo.StaffHolidays WHERE TenantId = @t; DELETE FROM dbo.StaffAttendanceSettings WHERE TenantId = @t;
+            DELETE FROM dbo.PushSubscriptions WHERE TenantId = @t;', N'@t UNIQUEIDENTIFIER', @t = @TenantId;
     DELETE FROM dbo.Subscriptions    WHERE TenantId = @TenantId;
     UPDATE dbo.Tenants SET LogoId = NULL WHERE Id = @TenantId;
     DELETE FROM dbo.CentreLogos      WHERE TenantId = @TenantId;
@@ -99,6 +103,12 @@ BEGIN
 END
 
 -- The logins themselves
+IF OBJECT_ID('dbo.StaffAttendance') IS NOT NULL
+BEGIN
+    DELETE x FROM dbo.StaffAttendance   x JOIN @Users u ON u.Id = x.UserId;
+    DELETE x FROM dbo.StaffLeaves       x JOIN @Users u ON u.Id = x.UserId;
+    DELETE x FROM dbo.PushSubscriptions x JOIN @Users u ON u.Id = x.UserId;
+END
 DELETE x FROM dbo.UserDevices x JOIN @Users u ON u.Id = x.UserId;
 DELETE x FROM dbo.EmailCodes  x JOIN @Users u ON u.Id = x.UserId;
 DELETE x FROM dbo.UserBatches x JOIN @Users u ON u.Id = x.UserId;

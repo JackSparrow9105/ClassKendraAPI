@@ -161,3 +161,26 @@ Database: run `Database/2026-11-17-new-and-existing.sql` once, after the admissi
   `PUT centre/admission-numbering { style, nextNumber? }`. "Serial" continues the school's register (1251, 1252…);
   without nextNumber it starts after the highest plain number already in use. Automatic numbers skip numbers already taken.
 - Dashboard `insights.newThisMonth` counts new admissions only. Admission confirmations go to new admissions only.
+
+### Staff attendance for schools, leave, app notifications (17 Nov)
+Database: run `Database/2026-11-17-staff-attendance.sql` once. NuGet: `WebPush` 1.0.12 (restored on build).
+Config: `Push:PublicKey` is in appsettings.json; put `Push:PrivateKey` in Azure → App Service → Configuration
+(`Push__PrivateKey`). Without it everything works except app notifications. `App:PublicUrl` must be the app's address.
+
+Only for schools on School 200 / 300 / 500 / 1000 (and trials). Others get 403 `{ reason: "NotSchool" | "Plan" }`.
+- `GET staff-attendance/status` → `{ enabled, reason }`
+- Teacher / office staff: `GET me/today`, `POST me/check-in { latitude, longitude, accuracy }` (within the radius, 200 m;
+  up to 50 m of GPS accuracy allowed), `POST me/check-out`, `GET me/month?month=yyyy-MM`,
+  `GET me/leaves`, `POST me/leaves { from, to, reason }`, `DELETE me/leaves/{id}` (pending only).
+- Owner: `GET today?date=`, `PUT mark { userId, date, status: Present|Late|Absent|Leave|Clear, checkIn: "08:05" }`,
+  `GET leaves`, `POST leaves/{id}/approve`, `POST leaves/{id}/reject { reason }`, `GET report?month=`,
+  `GET/PUT settings { start, end, weeklyOff }`, `PUT settings/location { latitude, longitude }`,
+  `PUT settings/notifications { notifyLeaveRequests, notifyLeaveAnswers, leaveWhatsApp }`,
+  `POST holidays { name, from, to }`, `DELETE holidays/{id}`, `PUT timings/{userId} { start, end }` (nulls = school timing).
+- Rules: Late = more than 10 min after the person's start; no half days; holidays and weekly offs never count;
+  approved leave = Leave; a working day without check-in = Absent once the school day is over (NotYet before that).
+- Leave notifications: app notification (free) to the owner on a request and to the teacher on approve/reject;
+  WhatsApp only when "Also send on WhatsApp" is on, and only to people the app notification didn't reach.
+  Message types `LeaveRequest`, `LeaveAnswer`; Meta templates `leave_request` [name, dates, days, reason],
+  `leave_approved` [dates, centre], `leave_rejected` [dates, reason, centre] (+ `_free` variants unused: schools only).
+- App notifications: `GET push/key`, `POST push/subscriptions { endpoint, keys: { p256dh, auth } }`, `DELETE push/subscriptions?endpoint=`.
