@@ -29,7 +29,8 @@ public record DashboardInsights(
 [ApiController]
 [Route("api/v1/dashboard")]
 [Authorize(Roles = "Owner,Staff")]
-public class DashboardController(ClassKendraContext db, BillingService billing) : ControllerBase
+public class DashboardController(ClassKendraContext db, BillingService billing,
+    ClassKendraAPI.Features.Holidays.HolidayService holidays) : ControllerBase
 {
     private const int LateRows = 7;
 
@@ -47,7 +48,7 @@ public class DashboardController(ClassKendraContext db, BillingService billing) 
 
         // ---------- Money ----------
         var monthPayments = await db.Payments.AsNoTracking()
-            .Where(p => p.PaidOn >= monthStart && p.PaidOn < monthEnd)
+            .Where(p => p.PaidOn >= monthStart && p.PaidOn < monthEnd && p.Mode != ClassKendraAPI.Features.Payments.PaymentModes.Opening)
             .Select(p => new { p.Amount, p.Mode })
             .ToListAsync(ct);
         var collected = monthPayments.Sum(p => p.Amount);
@@ -87,7 +88,7 @@ public class DashboardController(ClassKendraContext db, BillingService billing) 
         var studentCount = studentsByBatch.Values.Sum();
 
         var feesConfigured = await db.FeeSettings.AnyAsync(ct) &&
-                             await db.FeeHeads.AnyAsync(h => !h.IsDeleted && h.FeeHeadAmounts.Any(a => a.Amount > 0), ct);
+                             await db.FeeHeads.AnyAsync(h => !h.IsDeleted && h.Kind == null && h.FeeHeadAmounts.Any(a => a.Amount > 0), ct);
 
         // ---------- Late fees (most overdue first) ----------
         var needsAttention = StudentFeesRows.Build(unpaid, today)
@@ -136,7 +137,7 @@ public class DashboardController(ClassKendraContext db, BillingService billing) 
             .GroupBy(d => d.Month)
             .ToDictionary(g => g.Key, g => g.Sum(d => d.Amount));
         var collectedByMonth = (await db.Payments.AsNoTracking()
-                .Where(p => p.PaidOn >= trendStart)
+                .Where(p => p.PaidOn >= trendStart && p.Mode != ClassKendraAPI.Features.Payments.PaymentModes.Opening)
                 .Select(p => new { p.PaidOn, p.Amount })
                 .ToListAsync(ct))
             .GroupBy(p => p.PaidOn.ToString("yyyy-MM"))
@@ -165,6 +166,7 @@ public class DashboardController(ClassKendraContext db, BillingService billing) 
             .ToList();
 
         var recent = await db.Payments.AsNoTracking()
+            .Where(p => p.Mode != ClassKendraAPI.Features.Payments.PaymentModes.Opening)
             .OrderByDescending(p => p.CreatedAt)
             .Take(6)
             .Select(p => new { p.Id, p.ReceiptNo, Student = p.Student.Name, Batch = p.Student.Batch.Name, p.Amount, p.Mode, p.PaidOn, p.CreatedAt })
@@ -174,8 +176,9 @@ public class DashboardController(ClassKendraContext db, BillingService billing) 
                 p.Amount, p.Mode, p.PaidOn.ToString("yyyy-MM-dd"), $"{p.CreatedAt:yyyy-MM-ddTHH:mm:ss}Z"))
             .ToList();
 
+        var holidayToday = await holidays.NameAsync(today, ct) is not null;   // no classes expected on a holiday
         var classesToday = batches
-            .Where(b => ClassDays.MeetsOn(b.Days, today))
+            .Where(b => !holidayToday && ClassDays.MeetsOn(b.Days, today))
             .OrderBy(b => b.StartTime ?? TimeOnly.MaxValue)
             .Select(b =>
             {

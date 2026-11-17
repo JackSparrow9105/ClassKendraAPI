@@ -12,7 +12,10 @@ namespace ClassKendraAPI.Features.Students;
 
 // ---- Shapes that match models.ts / student.service.ts ----
 /// <param name="AdmissionNo">Optional: the student's number in the school register. Empty = made automatically.</param>
-public record StudentImportRow(string Name, string ParentPhone, string BatchName, string? AdmissionNo = null);
+/// <param name="PreviousDues">Optional: what the student owed before ClassKendra (₹). Becomes a "Previous dues" fee.</param>
+/// <param name="AdvancePaid">Optional: what the parent had already paid ahead (₹). Used on the next fees.</param>
+public record StudentImportRow(string Name, string ParentPhone, string BatchName, string? AdmissionNo = null,
+    int? PreviousDues = null, int? AdvancePaid = null);
 public record ImportSkip(int Row, string Reason);
 public record ImportResult(int Added, List<ImportSkip> Skipped);
 
@@ -24,7 +27,7 @@ public record PromotionResult(int Moved, int Left, int KeptBack);
 [Route("api/v1/students")]
 [Authorize]
 public class StudentToolsController(ClassKendraContext db, CurrentUser current, BillingService billing, PlanService plans,
-                                    AdmissionService admissions) : ControllerBase
+                                    AdmissionService admissions, OpeningBalanceService opening) : ControllerBase
 {
     /// <summary>POST /students/import — rows from the Excel/CSV screen.</summary>
     [HttpPost("import")]
@@ -52,6 +55,7 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
         var result = new ImportResult(0, []);
         var added = 0;
         var newStudents = new List<Student>();
+        var openings = new List<(Student Student, int Dues, int Advance)>();
 
         for (var i = 0; i < rows.Count; i++)
         {
@@ -69,6 +73,8 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
             { result.Skipped.Add(new(rowNo, $"Admission no. is longer than {AdmissionService.MaxLength} characters")); continue; }
             if (admissionNo.Length > 0 && usedNos.Contains(admissionNo))
             { result.Skipped.Add(new(rowNo, $"Admission no. {admissionNo} is already given to another student")); continue; }
+            if (r.PreviousDues is < 0 or > 10_000_000 || r.AdvancePaid is < 0 or > 10_000_000)
+            { result.Skipped.Add(new(rowNo, "Previous dues or advance is not a valid amount")); continue; }
             if (!existing.Add(Key(name, phone)))
             { result.Skipped.Add(new(rowNo, "Already added with this number")); continue; }
             if (admissionNo.Length > 0) usedNos.Add(admissionNo);
@@ -90,6 +96,8 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
             };
             db.Students.Add(student);
             newStudents.Add(student);
+            if ((r.PreviousDues ?? 0) > 0 || (r.AdvancePaid ?? 0) > 0)
+                openings.Add((student, r.PreviousDues ?? 0, r.AdvancePaid ?? 0));
             added++;
         }
 
@@ -99,7 +107,14 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
         // Imported students without a number get one too, but no WhatsApp confirmation (they joined long ago).
         await admissions.AssignNumbersAsync(tenantId, newStudents, ct);
         await db.SaveChangesAsync(ct);
-        if (added > 0) await billing.RaiseAsync(newStudents.Select(s => s.Id).ToList(), ct);
+        if (added > 0)
+        {
+            // Previous dues and advance from the file, before this month's bills so the advance is used on them.
+            foreach (var (st, dues, advance) in openings)
+                await opening.SetAsync(st.Id, dues, advance, Clock.Today, ct);
+            await billing.RaiseAsync(newStudents.Select(s => s.Id).ToList(), ct);
+            await billing.RepriceFamiliesAsync(newStudents.Select(s => s.ParentPhone).Distinct().ToList(), ct);
+        }
         return result with { Added = added };
     }
 
@@ -154,6 +169,7 @@ public class StudentToolsController(ClassKendraContext db, CurrentUser current, 
                 { StudentId = st.Id, FromBatchId = st.BatchId, ToBatchId = null, PromotionRun = run, ChangedAt = DateTime.UtcNow });
                 st.IsActive = false;
                 st.LeftOn = Clock.Today;
+                st.LeftReason = "PassedOut";   // fees already raised stay owed, as before
                 left++;
             }
             else if (to.Value != st.BatchId)

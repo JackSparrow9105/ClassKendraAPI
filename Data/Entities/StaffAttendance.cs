@@ -17,7 +17,7 @@ public class StaffAttendanceSetting
     public int GraceMinutes { get; set; } = 10;
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }
-    public int RadiusMeters { get; set; } = 200;
+    public int RadiusMeters { get; set; } = 300;
     /// <summary>Days off, "0" = Sunday … "6" = Saturday, comma separated.</summary>
     public string WeeklyOff { get; set; } = "0";
     public bool NotifyLeaveRequests { get; set; } = true;
@@ -26,7 +26,7 @@ public class StaffAttendanceSetting
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }
 
-public class StaffHoliday
+public class Holiday
 {
     public Guid Id { get; set; }
     public Guid TenantId { get; set; }

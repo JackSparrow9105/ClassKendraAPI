@@ -87,6 +87,13 @@ builder.Services.AddScoped<ClassKendraAPI.Features.Students.AdmissionService>();
 builder.Services.AddScoped<ClassKendraAPI.Features.StaffAttendance.PushService>();
 builder.Services.AddScoped<ClassKendraAPI.Features.StaffAttendance.StaffAttendanceService>();   // admission numbers + WhatsApp confirmation
 builder.Services.AddScoped<PaymentService>();
+builder.Services.AddScoped<AdvanceService>();   // money paid that isn't on any bill yet
+builder.Services.AddScoped<LateFeeService>();   // late fees on overdue bills (daily job)
+builder.Services.AddScoped<FamilyService>();    // siblings: same parent phone
+builder.Services.AddScoped<OpeningBalanceService>();
+builder.Services.AddScoped<ClassKendraAPI.Features.Exports.ExportService>();   // Excel downloads and "all my data"   // dues and advance from before ClassKendra
+builder.Services.AddScoped<ClassKendraAPI.Features.Activity.AuditService>();   // activity log (who did what, and why)
+builder.Services.AddScoped<ClassKendraAPI.Features.Holidays.HolidayService>();   // one holiday list for the whole centre
 builder.Services.AddScoped<MessageService>();
 builder.Services.AddScoped<PlanService>();
 builder.Services.AddScoped<SubscriptionService>();

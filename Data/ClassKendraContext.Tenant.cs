@@ -33,7 +33,12 @@ public partial class ClassKendraContext
 		modelBuilder.Entity<StudentConcession>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
 		modelBuilder.Entity<FeeDue>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
 		modelBuilder.Entity<ReceiptSequence>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
-		modelBuilder.Entity<Payment>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
+		// Payments have two filters: the centre, and "not cancelled". Cancelled payments stay in the table
+		// (with their receipt number) but no total, report or balance counts them.
+		// To show them: db.Payments.IgnoreQueryFilters([NotCancelled]) — the centre filter stays on.
+		modelBuilder.Entity<Payment>()
+			.HasQueryFilter(TenantFilter, e => e.TenantId == CurrentTenantId)
+			.HasQueryFilter(NotCancelled, e => e.CancelledAt == null);
 		modelBuilder.Entity<PaymentOrder>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
 		modelBuilder.Entity<AttendanceSheet>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
 		modelBuilder.Entity<Message>().HasQueryFilter(e => e.TenantId == CurrentTenantId);
@@ -44,6 +49,8 @@ public partial class ClassKendraContext
 		ConfigureBackupEmail(modelBuilder);   // backup email + EmailCodes (ClassKendraContext.BackupEmail.cs)
 		ConfigureMessageSettings(modelBuilder);   // receipts on/off, absent alert rule (ClassKendraContext.Messages.cs)
 		ConfigureAdmissions(modelBuilder);   // admission numbers + confirmations (ClassKendraContext.Admissions.cs)
+		ConfigureAudit(modelBuilder);
+		ConfigureMoney(modelBuilder);   // advance, refunds, adjustments, opening balance, late fee, siblings (ClassKendraContext.Money.cs)   // cancelled payments, activity log, students leaving (ClassKendraContext.Audit.cs)
 		ConfigureStaffAttendance(modelBuilder);   // staff attendance, leave, app notifications (ClassKendraContext.StaffAttendance.cs)
 	}
 }

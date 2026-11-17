@@ -37,7 +37,8 @@ public record TeacherWeek(string Start, List<TeacherWeekSlot> Slots);
 [ApiController]
 [Route("api/v1/dashboard/teacher")]
 [Authorize]
-public class TeacherDashboardController(ClassKendraContext db, CurrentUser current) : ControllerBase
+public class TeacherDashboardController(ClassKendraContext db, CurrentUser current,
+    ClassKendraAPI.Features.Holidays.HolidayService holidays) : ControllerBase
 {
     private const int WatchWindow = 12;   // look at each student's last 12 classes
     private const int WatchMissed = 3;    // flag 3 or more absences in that window
@@ -90,9 +91,13 @@ public class TeacherDashboardController(ClassKendraContext db, CurrentUser curre
 
         // ---------- This week ----------
         var weekDays = Enumerable.Range(0, 6).Select(i => weekStart.AddDays(i)).ToList();   // Mon–Sat
+        // Holidays (Settings › Holidays): no class is expected, so nothing shows as "not marked".
+        var weekHolidays = await holidays.BetweenAsync(weekStart, weekStart.AddDays(6), ct);
+        bool Meets(string? days, DateOnly d) =>
+            ClassDays.MeetsOn(days, d) && !weekHolidays.Any(h => h.FromDate <= d && d <= h.ToDate);
         var weekSheets = sheets.Where(s => s.Date >= weekStart).ToList();
-        var weekScheduled = batches.Sum(b => weekDays.Count(d => ClassDays.MeetsOn(b.Days, d)));
-        var weekMarked = weekSheets.Count(s => ClassDays.MeetsOn(batches.First(b => b.Id == s.BatchId).Days, s.Date));
+        var weekScheduled = batches.Sum(b => weekDays.Count(d => Meets(b.Days, d)));
+        var weekMarked = weekSheets.Count(s => Meets(batches.First(b => b.Id == s.BatchId).Days, s.Date));
         var weekStartUtc = weekStart.ToDateTime(TimeOnly.MinValue).AddMinutes(-330);
         var alertsThisWeek = weekSheets.Sum(s => s.Absences.Count(a => a.AlertedAt >= weekStartUtc));
 
@@ -101,7 +106,7 @@ public class TeacherDashboardController(ClassKendraContext db, CurrentUser curre
 
         // ---------- Today ----------
         var classesToday = batches
-            .Where(b => ClassDays.MeetsOn(b.Days, today))
+            .Where(b => Meets(b.Days, today))
             .OrderBy(b => b.StartTime ?? TimeOnly.MaxValue)
             .Select(b =>
             {
@@ -151,13 +156,13 @@ public class TeacherDashboardController(ClassKendraContext db, CurrentUser curre
 
         // ---------- Week grid: one row per batch ----------
         var slots = batches
-            .Where(b => weekDays.Any(d => ClassDays.MeetsOn(b.Days, d)))
+            .Where(b => weekDays.Any(d => Meets(b.Days, d)))
             .OrderBy(b => b.StartTime ?? TimeOnly.MaxValue).ThenBy(b => b.Name)
             .Select(b => new TeacherWeekSlot(b.Id.ToString(), b.Name, Hm(b.StartTime),
                 weekDays.Select(d =>
                 {
                     var sheet = sheets.FirstOrDefault(s => s.BatchId == b.Id && s.Date == d);
-                    return new TeacherWeekDay(d.ToString("yyyy-MM-dd"), ClassDays.MeetsOn(b.Days, d),
+                    return new TeacherWeekDay(d.ToString("yyyy-MM-dd"), Meets(b.Days, d),
                         sheet?.PresentCount, sheet is null ? studentsByBatch.GetValueOrDefault(b.Id)?.Count ?? 0
                                                            : sheet.PresentCount + sheet.Absences.Count);
                 }).ToList()))

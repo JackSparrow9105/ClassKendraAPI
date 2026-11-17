@@ -14,9 +14,12 @@ using Microsoft.EntityFrameworkCore;
 namespace ClassKendraAPI.Features.OnlinePayments;
 
 // Match ParentPayPage and ParentPayOrder in models.ts.
+/// <param name="StudentName">All the children with something due: "Aarav & Diya".</param>
+/// <param name="Children">Each child on the page (brothers and sisters with the same parent phone). Dues carry their studentId.</param>
 public record ParentPayPage(
     string OrgName, string OrgCity, string StudentName, string BatchName,
-    List<FeeDueView> Dues, int Total, string Language);
+    List<FeeDueView> Dues, int Total, string Language, List<PayChild>? Children = null);
+public record PayChild(string StudentId, string Name, string BatchName, int Balance);
 public record ParentPayOrder(string OrderId, int Amount, string KeyId);
 public record PublicOrderInput(string[]? DueIds);
 public record VerifyInput(string RazorpayOrderId, string RazorpayPaymentId, string RazorpaySignature);
@@ -48,12 +51,22 @@ public class PublicPayController(
         if (student.Tenant.PlanCode == PlanStates.FreePlanCode) return NotFound(new { message = NoOnlinePayment });
 
         var today = Clock.Today;
-        var dues = (await UnpaidDues(student.Id, ct))
-            .Select(d => FeeViews.ToView(d, student.Name, d.Batch.Name, today))
+        var kids = await FamilyOf(student, ct);
+        var dues = (await UnpaidDues(kids.Select(k => k.Id).ToList(), ct))
+            .Select(d => FeeViews.ToView(d, d.Student.Name, d.Batch.Name, today))
             .ToList();
 
-        return new ParentPayPage(student.Tenant.Name, student.Tenant.City, student.Name, student.Batch.Name,
-            dues, dues.Sum(d => d.Balance), (student.Tenant.MessageLanguage ?? "en").Trim());
+        // The child the link was sent for first, then brothers and sisters who owe something.
+        var children = kids
+            .Select(k => new PayChild(k.Id.ToString(), k.Name, k.Batch.Name, dues.Where(d => d.StudentId == k.Id.ToString()).Sum(d => d.Balance)))
+            .Where(c => c.StudentId == student.Id.ToString() || c.Balance > 0)
+            .ToList();
+        var owing = children.Where(c => c.Balance > 0).Select(c => c.Name).ToList();
+
+        return new ParentPayPage(student.Tenant.Name, student.Tenant.City,
+            owing.Count > 1 ? FamilyService.Names(owing) : student.Name,
+            owing.Count > 1 ? "" : student.Batch.Name,
+            dues, dues.Sum(d => d.Balance), (student.Tenant.MessageLanguage ?? "en").Trim(), children);
     }
 
     /// <summary>POST /public/pay/{token}/order { dueIds } → { orderId, amount, keyId }</summary>
@@ -66,7 +79,8 @@ public class PublicPayController(
         if (!razorpay.IsConfigured)
             return BadRequest(new { message = "Online payment is not available yet. Please pay at the school." });
 
-        var dues = await UnpaidDues(student.Id, ct);
+        var kids = await FamilyOf(student, ct);
+        var dues = await UnpaidDues(kids.Select(k => k.Id).ToList(), ct);
         var wanted = (input.DueIds ?? []).Select(x => Guid.TryParse(x, out var g) ? g : Guid.Empty).ToHashSet();
         var chosen = wanted.Count == 0 ? dues : dues.Where(d => wanted.Contains(d.Id)).ToList();
         if (chosen.Count == 0 || (wanted.Count > 0 && chosen.Count != wanted.Count))
@@ -152,24 +166,46 @@ public class PublicPayController(
         return (await views.PaymentViews([p], ct))[0];
     }
 
-    /// <summary>Active students only (a student who left gets "link not valid", as in the app).</summary>
+    /// <summary>
+    /// Active students, and students who left but still owe fees (so the parent can clear them).
+    /// A student who left with nothing owed gets "link not valid".
+    /// </summary>
     private async Task<Student?> FindStudent(string token, CancellationToken ct)
     {
         if (token.Length != 32 || !token.All(Uri.IsHexDigit)) return null;
 
         var student = await db.Students.IgnoreQueryFilters().AsNoTracking()
             .Include(s => s.Tenant).Include(s => s.Batch)
-            .FirstOrDefaultAsync(s => s.PayToken == token && s.IsActive, ct);
-        if (student is not null) current.ActAsTenant(student.TenantId);   // everything after this sees only that centre
+            .FirstOrDefaultAsync(s => s.PayToken == token, ct);
+        if (student is null) return null;
+        current.ActAsTenant(student.TenantId);   // everything after this sees only that centre
+
+        if (!student.IsActive && !await db.FeeDues.AnyAsync(d => d.StudentId == student.Id
+                && (d.Status == DueStatus.Pending || d.Status == DueStatus.Partial), ct))
+            return null;
         return student;
     }
 
-    private Task<List<FeeDue>> UnpaidDues(Guid studentId, CancellationToken ct) =>
+    private Task<List<FeeDue>> UnpaidDues(List<Guid> studentIds, CancellationToken ct) =>
         db.FeeDues
-            .Include(d => d.Batch)
-            .Where(d => d.StudentId == studentId && (d.Status == DueStatus.Pending || d.Status == DueStatus.Partial))
+            .Include(d => d.Batch).Include(d => d.Student)
+            .Where(d => studentIds.Contains(d.StudentId) && (d.Status == DueStatus.Pending || d.Status == DueStatus.Partial))
             .OrderBy(d => d.DueDate).ThenBy(d => d.HeadName)
             .ToListAsync(ct);
+
+    /// <summary>
+    /// This student and their brothers and sisters (same parent phone, same centre) who are still studying here or still owe.
+    /// The tenant filter is already switched to this centre by FindStudent.
+    /// </summary>
+    private async Task<List<Student>> FamilyOf(Student s, CancellationToken ct)
+    {
+        var others = await db.Students.AsNoTracking().Include(x => x.Batch)
+            .Where(x => x.ParentPhone == s.ParentPhone && x.Id != s.Id
+                        && (x.IsActive || x.FeeDues.Any(d => d.Status == DueStatus.Pending || d.Status == DueStatus.Partial)))
+            .OrderBy(x => x.JoinedOn).ThenBy(x => x.Name)
+            .ToListAsync(ct);
+        return [s, .. others];
+    }
 
     private static int Balance(FeeDue d) => (d.Amount ?? d.GrossAmount - d.Discount) - d.PaidAmount;
 }

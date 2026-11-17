@@ -7,7 +7,7 @@ namespace ClassKendraAPI.Features.Fees;
 
 /// <summary>
 /// Once a day for every centre:
-///  1. raise this month's bills (safe to repeat — catches new months, new students, missed runs)
+///  1. raise this month's bills (safe to repeat — catches new months, new students, missed runs), then late fees
 ///  2. after 10:00 IST, send automatic fee reminders (only while the centre's plan is active)
 /// Checks every 30 minutes; each job runs once per IST day per app start (and both are safe to repeat).
 /// </summary>
@@ -29,7 +29,11 @@ public class DailyJobsWorker(IServiceScopeFactory scopes, ILogger<DailyJobsWorke
             {
                 if (_billedOn != today)
                 {
-                    await ForEachCentre(async sp => await sp.GetRequiredService<BillingService>().RaiseAsync(null, stop), "billing", stop);
+                    await ForEachCentre(async sp =>
+                    {
+                        await sp.GetRequiredService<BillingService>().RaiseAsync(null, stop);
+                        await sp.GetRequiredService<LateFeeService>().RaiseAsync(stop);   // after the bills, before reminders
+                    }, "billing", stop);
                     _billedOn = today;
                 }
 

@@ -11,9 +11,12 @@ namespace ClassKendraAPI.Features.Reports;
 public record ModeTotal(string Mode, int Amount, int Count);
 public record GroupTotal(string BatchId, string Name, int Collected, int Pending);
 public record HeadTotal(string HeadName, int Collected);
+/// <param name="Refunded">Money given back to parents in the month (refunds).</param>
+/// <param name="Waived">Parts of fees waived in the month (adjustments, not concessions).</param>
 public record CollectionReport(
     string Month, int Collected, int ReceiptCount, int DiscountGiven,
-    List<ModeTotal> ByMode, List<GroupTotal> ByGroup, List<HeadTotal> ByHead, List<PaymentView> Payments);
+    List<ModeTotal> ByMode, List<GroupTotal> ByGroup, List<HeadTotal> ByHead, List<PaymentView> Payments,
+    int Refunded = 0, int Waived = 0);
 
 /// <summary>
 /// The Excel download is built in the browser from this same JSON (exceljs), so there is no .xlsx endpoint.
@@ -39,7 +42,7 @@ public class ReportsController(ClassKendraContext db, FeeReadService views) : Co
 
         var payments = await db.Payments.AsNoTracking()
             .Include(p => p.PaymentAllocations).ThenInclude(a => a.FeeDue)
-            .Where(p => p.PaidOn >= start && p.PaidOn < end)
+            .Where(p => p.PaidOn >= start && p.PaidOn < end && p.Mode != ClassKendraAPI.Features.Payments.PaymentModes.Opening)
             .OrderByDescending(p => p.PaidOn).ThenByDescending(p => p.ReceiptNo)
             .ToListAsync(ct);
 
@@ -75,7 +78,14 @@ public class ReportsController(ClassKendraContext db, FeeReadService views) : Co
             .Where(d => d.Month == m && d.Status != DueStatus.Cancelled)
             .SumAsync(d => (int?)d.Discount, ct) ?? 0;
 
+        var refunded = await db.Refunds.Where(r => r.RefundedOn >= start && r.RefundedOn < end).SumAsync(r => (int?)r.Amount, ct) ?? 0;
+        var startUtc = start.ToDateTime(TimeOnly.MinValue).AddMinutes(-330);
+        var endUtc = end.ToDateTime(TimeOnly.MinValue).AddMinutes(-330);
+        var waived = await db.FeeAdjustments
+            .Where(a => a.Kind == AdjustmentKinds.Waive && a.CreatedAt >= startUtc && a.CreatedAt < endUtc)
+            .SumAsync(a => (int?)a.Amount, ct) ?? 0;
+
         return new CollectionReport(m, payments.Sum(p => p.Amount), payments.Count, discountGiven,
-            byMode, byGroup, byHead, await views.PaymentViews(payments, ct));
+            byMode, byGroup, byHead, await views.PaymentViews(payments, ct), refunded, waived);
     }
 }

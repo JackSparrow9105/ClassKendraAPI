@@ -9,9 +9,15 @@ using Microsoft.EntityFrameworkCore;
 namespace ClassKendraAPI.Features.Attendance;
 
 // Matches AttendanceSheet in models.ts.
-public record AttendanceSheetDto(string BatchId, string Date, string[] AbsentStudentIds, bool Saved);
-public record SaveAttendanceInput(string Date, string[] AbsentStudentIds);
-public record SaveAttendanceResult(int Alerted);
+/// <param name="HolidayName">Set when that day is a holiday (Settings › Holidays): the register can still be saved, but no absent alerts go out.</param>
+public record AttendanceSheetDto(string BatchId, string Date, string[] AbsentStudentIds, bool Saved, string? HolidayName = null);
+/// <param name="ClientSavedAt">
+/// When the teacher pressed Save on the phone (UTC, ISO). Sent by registers saved offline and sent later: if someone
+/// else saved this register after that moment, the late copy is refused (409) instead of overwriting the newer one.
+/// </param>
+public record SaveAttendanceInput(string Date, string[] AbsentStudentIds, string? ClientSavedAt = null);
+/// <param name="Holiday">Set when the day is a holiday, which is why nobody was alerted.</param>
+public record SaveAttendanceResult(int Alerted, string? Holiday = null);
 
 /// <summary>
 /// Attendance is saved as "who was absent" per batch per day; everyone else is present.
@@ -21,6 +27,7 @@ public record SaveAttendanceResult(int Alerted);
 [Route("api/v1/attendance/{batchId:guid}")]
 [Authorize]
 public class AttendanceController(ClassKendraContext db, CurrentUser current, MessageService messages,
+                                  ClassKendraAPI.Features.Holidays.HolidayService holidays,
                                   ILogger<AttendanceController> log) : ControllerBase
 {
     private const int MaxDaysBack = 60;
@@ -38,7 +45,8 @@ public class AttendanceController(ClassKendraContext db, CurrentUser current, Me
             .FirstOrDefaultAsync(ct);
 
         return new AttendanceSheetDto(batchId.ToString(), day.ToString("yyyy-MM-dd"),
-            absent?.Select(x => x.ToString()).ToArray() ?? [], absent is not null);
+            absent?.Select(x => x.ToString()).ToArray() ?? [], absent is not null,
+            await holidays.NameAsync(day, ct));
     }
 
     /// <summary>
@@ -69,6 +77,19 @@ public class AttendanceController(ClassKendraContext db, CurrentUser current, Me
 
         var sheet = await db.AttendanceSheets.Include(a => a.AttendanceAbsences)
             .FirstOrDefaultAsync(a => a.BatchId == batchId && a.Date == day, ct);
+
+        // Saved offline earlier and only sent now: don't overwrite a register someone else saved in the meantime.
+        if (sheet is not null && sheet.MarkedByUserId != current.UserId
+            && DateTime.TryParse(input.ClientSavedAt, null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var clientAt)
+            && sheet.SavedAt > clientAt)
+        {
+            var by = await db.Users.AsNoTracking().Where(u => u.Id == sheet.MarkedByUserId).Select(u => u.Name).FirstOrDefaultAsync(ct);
+            return Conflict(new
+            {
+                message = $"{by ?? "Someone"} saved this register after you, so your copy saved on the phone was not used.",
+                conflict = true
+            });
+        }
         if (sheet is null)
         {
             sheet = new AttendanceSheet { TenantId = tenantId, BatchId = batchId, Date = day };
@@ -96,7 +117,9 @@ public class AttendanceController(ClassKendraContext db, CurrentUser current, Me
 
         var alerted = 0;
         var mode = (await messages.SettingsAsync(ct)).AbsentAlerts;
-        if (day == today && mode != AbsentAlertModes.Off)
+        // A holiday: an extra class can still be marked, but parents are not told their child was "absent".
+        var holiday = await holidays.NameAsync(day, ct);
+        if (day == today && mode != AbsentAlertModes.Off && holiday is null)
         {
             // "Only after 2 classes in a row": who was also absent at this batch's previous class?
             HashSet<Guid>? absentLastClass = null;
@@ -128,7 +151,7 @@ public class AttendanceController(ClassKendraContext db, CurrentUser current, Me
             if (alerted > 0) await db.SaveChangesAsync(ct);
         }
 
-        return new SaveAttendanceResult(alerted);
+        return new SaveAttendanceResult(alerted, holiday);
     }
 
     private Task<bool> CanUse(Guid batchId, CancellationToken ct) =>

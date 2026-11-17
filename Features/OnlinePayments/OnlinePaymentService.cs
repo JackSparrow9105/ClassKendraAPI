@@ -53,10 +53,41 @@ public class OnlinePaymentService(
                 return existing.Id;
             }
 
-            payment = await payments.RecordAsync(new PaymentRequest(
-                order.StudentId, order.Amount, PaymentModes.Online, Clock.Today, "Paid online",
-                order.FeeDues.Select(d => d.Id).ToList(), null, "Online (Razorpay)",
-                razorpayPaymentId, AllowExtra: true), ct);
+            // One order can cover brothers and sisters: each child gets a receipt for their own fees (linked as
+            // "paid together"). The Razorpay payment id goes on the first receipt only (it is unique). Fees paid
+            // in the meantime are skipped; any money left over stays with the child the link was for, as advance.
+            var byChild = order.FeeDues.GroupBy(d => d.StudentId).ToList();
+            if (byChild.Count <= 1)
+            {
+                // One child (maybe a brother or sister of the child the link was sent for).
+                payment = await payments.RecordAsync(new PaymentRequest(
+                    byChild.Count == 1 ? byChild[0].Key : order.StudentId, order.Amount, PaymentModes.Online, Clock.Today, "Paid online",
+                    order.FeeDues.Select(d => d.Id).ToList(), null, "Online (Razorpay)",
+                    razorpayPaymentId, AllowExtra: true), ct);
+            }
+            else
+            {
+                var groupId = Guid.NewGuid();
+                var left = order.Amount;
+                Payment? first = null;
+                // The child the link was for comes last, so leftover money (fees paid meanwhile) lands with them as advance.
+                var ordered = byChild.OrderBy(g => g.Key == order.StudentId ? 1 : 0).ToList();
+                for (var i = 0; i < ordered.Count && left > 0; i++)
+                {
+                    var g = ordered[i];
+                    var owed = g.Where(d => d.Status is DueStatus.Pending or DueStatus.Partial)
+                                .Sum(d => d.GrossAmount - d.Discount - d.PaidAmount);
+                    var amount = i == ordered.Count - 1 ? left : Math.Min(left, owed);
+                    if (amount <= 0) continue;
+                    var p = await payments.RecordAsync(new PaymentRequest(
+                        g.Key, amount, PaymentModes.Online, Clock.Today, "Paid online",
+                        g.Select(d => d.Id).ToList(), null, "Online (Razorpay)",
+                        first is null ? razorpayPaymentId : null, AllowExtra: true, GroupId: groupId), ct);
+                    first ??= p;
+                    left -= amount;
+                }
+                payment = first ?? throw new InvalidOperationException("Online order had nothing to record.");
+            }
 
             order.Status = OrderStatus.Paid;
             order.PaymentId = payment.Id;

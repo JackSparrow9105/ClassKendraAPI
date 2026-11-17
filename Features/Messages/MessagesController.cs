@@ -24,10 +24,28 @@ public class MessagesController(ClassKendraContext db, MessageService messages) 
     private static readonly string[] Statuses =
         [MessageStatus.Queued, MessageStatus.Sent, MessageStatus.Delivered, MessageStatus.Read, MessageStatus.Failed];
 
-    /// <summary>GET /messages?type=&status=&studentId=&search= — newest 200.</summary>
+    /// <summary>GET /messages?type=&status=&studentId=&search= — newest 200. For more, use /messages/page.</summary>
     [HttpGet]
     public async Task<ActionResult<List<MessageDto>>> List([FromQuery] string? type, [FromQuery] string? status,
         [FromQuery] Guid? studentId, [FromQuery] string? search, CancellationToken ct)
+    {
+        var rows = await Filter(type, status, studentId, search).OrderByDescending(m => m.CreatedAt).Take(200).ToListAsync(ct);
+        return rows.Select(ToDto).ToList();
+    }
+
+    /// <summary>GET /messages/page?type=&status=&studentId=&search=&page=&pageSize= — newest first, 50 at a time, with the total.</summary>
+    [HttpGet("page")]
+    public async Task<ActionResult<ClassKendraAPI.Common.Paged<MessageDto>>> Page([FromQuery] string? type, [FromQuery] string? status,
+        [FromQuery] Guid? studentId, [FromQuery] string? search, [FromQuery] int? page, [FromQuery] int? pageSize, CancellationToken ct)
+    {
+        var (p, size, skip) = ClassKendraAPI.Common.Paging.Clean(page, pageSize);
+        var q = Filter(type, status, studentId, search);
+        var total = await q.CountAsync(ct);
+        var rows = await q.OrderByDescending(m => m.CreatedAt).ThenByDescending(m => m.Id).Skip(skip).Take(size).ToListAsync(ct);
+        return new ClassKendraAPI.Common.Paged<MessageDto>(rows.Select(ToDto).ToList(), total, p, size);
+    }
+
+    private IQueryable<Message> Filter(string? type, string? status, Guid? studentId, string? search)
     {
         var q = db.Messages.AsNoTracking();
         if (!string.IsNullOrWhiteSpace(type)) q = q.Where(m => m.Type == type);
@@ -38,9 +56,7 @@ public class MessagesController(ClassKendraContext db, MessageService messages) 
             var term = search.Trim();
             q = q.Where(m => m.RecipientName.Contains(term) || m.Phone.Contains(term) || m.Text.Contains(term));
         }
-
-        var rows = await q.OrderByDescending(m => m.CreatedAt).Take(200).ToListAsync(ct);
-        return rows.Select(ToDto).ToList();
+        return q;
     }
 
     /// <summary>GET /messages/summary?days=30</summary>

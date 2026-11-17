@@ -7,7 +7,7 @@ namespace ClassKendraAPI.Data;
 public partial class ClassKendraContext
 {
     public virtual DbSet<StaffAttendanceSetting> StaffAttendanceSettings { get; set; }
-    public virtual DbSet<StaffHoliday> StaffHolidays { get; set; }
+    public virtual DbSet<Holiday> Holidays { get; set; }
     public virtual DbSet<StaffAttendanceRecord> StaffAttendance { get; set; }
     public virtual DbSet<StaffLeave> StaffLeaves { get; set; }
     public virtual DbSet<PushSubscriptionRow> PushSubscriptions { get; set; }
@@ -33,9 +33,9 @@ public partial class ClassKendraContext
             entity.HasQueryFilter(e => e.TenantId == CurrentTenantId);
         });
 
-        modelBuilder.Entity<StaffHoliday>(entity =>
+        modelBuilder.Entity<Holiday>(entity =>
         {
-            entity.ToTable("StaffHolidays");
+            entity.ToTable("Holidays");
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Id).HasDefaultValueSql("(newsequentialid())");
             entity.Property(e => e.Name).HasMaxLength(60);

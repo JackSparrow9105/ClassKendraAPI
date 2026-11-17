@@ -118,7 +118,7 @@ public class SubscriptionService(ClassKendraContext db, CurrentUser current)
 
         sub.Status = PlanStates.Active;
         sub.CurrentPeriodStart = start;
-        sub.CurrentPeriodEnd = start.AddMonths(sub.Cycle == "Yearly" ? 12 : 1).AddDays(-1);
+        sub.CurrentPeriodEnd = start.AddMonths(string.Equals(sub.Cycle, "Yearly", StringComparison.OrdinalIgnoreCase) ? 12 : 1).AddDays(-1);
 
         var plan = await db.Plans.FirstAsync(p => p.Code == sub.PlanCode, ct);
         var tenant = await db.Tenants.FirstAsync(t => t.Id == sub.TenantId, ct);

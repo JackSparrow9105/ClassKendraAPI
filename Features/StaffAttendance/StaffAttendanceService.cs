@@ -56,10 +56,10 @@ public class StaffAttendanceService(ClassKendraContext db, CurrentUser current, 
         return s;
     }
 
-    public sealed class Calendar(StaffAttendanceSetting settings, List<StaffHoliday> holidays)
+    public sealed class Calendar(StaffAttendanceSetting settings, List<Holiday> holidays)
     {
         public StaffAttendanceSetting Settings { get; } = settings;
-        public List<StaffHoliday> Holidays { get; } = holidays;
+        public List<Holiday> Holidays { get; } = holidays;
         private readonly HashSet<int> _off = ParseOff(settings.WeeklyOff);
 
         public bool IsWeeklyOff(DateOnly d) => _off.Contains((int)d.DayOfWeek);
@@ -80,7 +80,7 @@ public class StaffAttendanceService(ClassKendraContext db, CurrentUser current, 
     public async Task<Calendar> CalendarAsync(DateOnly from, DateOnly to, CancellationToken ct)
     {
         var settings = await SettingsAsync(ct);
-        var holidays = await db.StaffHolidays.AsNoTracking()
+        var holidays = await db.Holidays.AsNoTracking()
             .Where(h => h.FromDate <= to && h.ToDate >= from).OrderBy(h => h.FromDate).ToListAsync(ct);
         return new Calendar(settings, holidays);
     }

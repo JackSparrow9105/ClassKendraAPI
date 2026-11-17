@@ -41,7 +41,8 @@ public record BillPeriod(string Key, string Label);
 ///   never more than the bill. A bill with nothing left to pay (100% concession) is not raised.
 /// - A bill cancelled earlier (student opted out, then back in) is revived when it applies again.
 /// </summary>
-public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<BillingService> log)
+public class BillingService(ClassKendraContext db, CurrentUser current, FamilyService family,
+                            ClassKendraAPI.Features.Payments.AdvanceService advances, ILogger<BillingService> log)
 {
     private static readonly CultureInfo En = CultureInfo.InvariantCulture;
 
@@ -76,15 +77,21 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
 
         var heads = await db.FeeHeads.AsNoTracking()
             .Include(h => h.FeeHeadAmounts)
-            .Where(h => !h.IsDeleted)
+            .Where(h => !h.IsDeleted && h.Kind == null)   // the centre's own fees (not late fees, previous dues…)
             .ToListAsync(ct);
         if (heads.Count == 0) return 0;
 
         var studentsQ = db.Students.AsNoTracking().Where(s => s.IsActive && s.JoinedOn <= monthEnd);
         if (studentIds is { Count: > 0 }) studentsQ = studentsQ.Where(s => studentIds.Contains(s.Id));
-        var students = await studentsQ.Select(s => new { s.Id, s.BatchId, s.JoinedOn, s.IsNewAdmission }).ToListAsync(ct);
+        var students = await studentsQ.Select(s => new { s.Id, s.BatchId, s.JoinedOn, s.IsNewAdmission, s.ParentPhone }).ToListAsync(ct);
         if (students.Count == 0) return 0;
         var ids = students.Select(s => s.Id).ToList();
+
+        // Sibling discount: every child of a family except the first one.
+        var siblingConcession = FamilyService.SiblingConcession(settings);
+        var siblings = siblingConcession is null
+            ? []
+            : await family.SiblingsWithDiscountAsync(students.Select(s => s.ParentPhone).Distinct().ToList(), ct);
 
         // Who opted in to which optional fee.
         var optionalHeadIds = heads.Where(h => h.IsOptional).Select(h => h.Id).ToList();
@@ -109,6 +116,16 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
             .ToListAsync(ct);
         var existingByKey = existing.ToDictionary(d => (d.StudentId, d.FeeHeadId, d.Period));
 
+        // Parts waived on cancelled bills: a bill waived to ₹0 must not come back when the billing runs again.
+        var cancelledIds = existing.Where(d => d.Status == DueStatus.Cancelled).Select(d => d.Id).ToList();
+        var waived = cancelledIds.Count == 0
+            ? new Dictionary<Guid, int>()
+            : await db.FeeAdjustments.AsNoTracking()
+                .Where(a => a.Kind == AdjustmentKinds.Waive && cancelledIds.Contains(a.FeeDueId))
+                .GroupBy(a => a.FeeDueId)
+                .Select(g => new { g.Key, Total = g.Sum(a => a.Amount) })
+                .ToDictionaryAsync(x => x.Key, x => x.Total, ct);
+
         var dueDate = new DateOnly(monthStart.Year, monthStart.Month, Math.Clamp(dueDay, 1, 28));
         var created = 0;
 
@@ -122,13 +139,15 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
                 if (!IsDueIn(head.Frequency, monthStart, sessionStart, st.JoinedOn, st.IsNewAdmission)) continue;
 
                 var period = periodByHead[head.Id];
-                var discount = Discount(gross, concessions[st.Id], head.Id);
+                var discount = Discount(gross, FamilyService.WithSibling(concessions[st.Id], siblings.Contains(st.Id), siblingConcession), head.Id);
                 if (gross - discount <= 0) continue;   // full scholarship: nothing to bill
 
                 if (existingByKey.TryGetValue((st.Id, head.Id, period.Key), out var bill))
                 {
-                    if (bill.Status == DueStatus.Cancelled && bill.PaidAmount == 0)
+                    if (bill.Status == DueStatus.Cancelled && bill.PaidAmount == 0
+                        && gross - discount - waived.GetValueOrDefault(bill.Id) > 0)   // not waived away by the office
                     {
+                        discount = Math.Min(gross, discount + waived.GetValueOrDefault(bill.Id));
                         bill.Status = DueStatus.For(gross - discount, 0);
                         bill.CancelledAt = null;
                         bill.GrossAmount = gross;
@@ -161,7 +180,15 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
             }
         }
 
-        if (created > 0) await db.SaveChangesAsync(ct);
+        if (created > 0)
+        {
+            // Students who got a new (or revived) bill: use any advance they have on it straight away.
+            var billed = db.ChangeTracker.Entries<FeeDue>()
+                .Where(e => e.State is EntityState.Added or EntityState.Modified)
+                .Select(e => e.Entity.StudentId).Distinct().ToList();
+            await db.SaveChangesAsync(ct);
+            await advances.ApplyAsync(billed, ct);
+        }
         return created;
     }
 
@@ -171,16 +198,42 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
     /// </summary>
     public async Task RepriceAsync(Guid studentId, CancellationToken ct)
     {
-        var concessions = await db.StudentConcessions.AsNoTracking()
-            .Where(c => c.StudentId == studentId).ToListAsync(ct);
+        await RepriceManyAsync([studentId], ct);
+        await RaiseAsync([studentId], ct);
+    }
 
-        var bills = await db.FeeDues
-            .Where(d => d.StudentId == studentId && d.Status == DueStatus.Pending && d.PaidAmount == 0)
-            .ToListAsync(ct);
+    /// <summary>
+    /// Re-prices unpaid bills (no money on them yet) of these students — or of the whole centre when null —
+    /// from their concessions, the sibling discount and any part waived. Late fees, previous dues and
+    /// extra charges are never re-priced.
+    /// </summary>
+    public async Task RepriceManyAsync(IReadOnlyCollection<Guid>? studentIds, CancellationToken ct)
+    {
+        var q = db.FeeDues.Where(d => d.Status == DueStatus.Pending && d.PaidAmount == 0 && d.Kind == null);
+        if (studentIds is not null) q = q.Where(d => studentIds.Contains(d.StudentId));
+        var bills = await q.ToListAsync(ct);
+        if (bills.Count == 0) return;
+
+        var ids = bills.Select(b => b.StudentId).Distinct().ToList();
+        var concessions = (await db.StudentConcessions.AsNoTracking()
+            .Where(c => ids.Contains(c.StudentId)).ToListAsync(ct)).ToLookup(c => c.StudentId);
+        var settings = await db.FeeSettings.AsNoTracking().FirstOrDefaultAsync(ct);
+        var siblingConcession = FamilyService.SiblingConcession(settings);
+        var phones = await db.Students.AsNoTracking().Where(s => ids.Contains(s.Id)).Select(s => s.ParentPhone).Distinct().ToListAsync(ct);
+        var siblings = siblingConcession is null ? [] : await family.SiblingsWithDiscountAsync(phones, ct);
+
+        var billIds = bills.Select(b => b.Id).ToList();
+        var waived = await db.FeeAdjustments.AsNoTracking()
+            .Where(a => a.Kind == AdjustmentKinds.Waive && billIds.Contains(a.FeeDueId))
+            .GroupBy(a => a.FeeDueId)
+            .Select(g => new { g.Key, Total = g.Sum(a => a.Amount) })
+            .ToDictionaryAsync(x => x.Key, x => x.Total, ct);
 
         foreach (var b in bills)
         {
-            b.Discount = Discount(b.GrossAmount, concessions, b.FeeHeadId);
+            var discount = Discount(b.GrossAmount,
+                FamilyService.WithSibling(concessions[b.StudentId], siblings.Contains(b.StudentId), siblingConcession), b.FeeHeadId);
+            b.Discount = Math.Min(b.GrossAmount, discount + waived.GetValueOrDefault(b.Id));
             if (b.GrossAmount - b.Discount <= 0)
             {
                 b.Status = DueStatus.Cancelled;
@@ -189,7 +242,57 @@ public class BillingService(ClassKendraContext db, CurrentUser current, ILogger<
         }
         await db.SaveChangesAsync(ct);
         db.ChangeTracker.Clear();
-        await RaiseAsync([studentId], ct);
+    }
+
+    /// <summary>
+    /// A family changed (a child joined, left, came back, or a phone number changed): who is the "first child"
+    /// may be different now, so re-price the unpaid bills of everyone with these phone numbers.
+    /// </summary>
+    public async Task RepriceFamiliesAsync(IReadOnlyCollection<string> phones, CancellationToken ct)
+    {
+        var settings = await db.FeeSettings.AsNoTracking().FirstOrDefaultAsync(ct);
+        if (FamilyService.SiblingConcession(settings) is null || phones.Count == 0) return;
+        var ids = await db.Students.AsNoTracking().Where(s => phones.Contains(s.ParentPhone)).Select(s => s.Id).ToListAsync(ct);
+        if (ids.Count > 1) await RepriceManyAsync(ids, ct);
+    }
+
+    /// <summary>
+    /// The student moved to another batch and the owner chose "charge the new batch's fee this month":
+    /// this month's bills with no money on them are re-priced at the new batch's amounts (a fee the new
+    /// batch doesn't have is cancelled), then any fee only the new batch has is raised.
+    /// Returns how many bills changed.
+    /// </summary>
+    public async Task<int> MoveThisMonthToBatchAsync(Guid studentId, Guid newBatchId, CancellationToken ct)
+    {
+        var month = Clock.Today.ToString("yyyy-MM", En);
+        var bills = await db.FeeDues
+            .Where(d => d.StudentId == studentId && d.Month == month && d.Kind == null
+                        && d.Status == DueStatus.Pending && d.PaidAmount == 0 && d.BatchId != newBatchId)
+            .ToListAsync(ct);
+        if (bills.Count == 0) return 0;
+
+        var headIds = bills.Select(b => b.FeeHeadId).Distinct().ToList();
+        var amounts = await db.Set<FeeHeadAmount>().AsNoTracking()
+            .Where(a => a.BatchId == newBatchId && headIds.Contains(a.FeeHeadId))
+            .ToDictionaryAsync(a => a.FeeHeadId, a => a.Amount, ct);
+
+        foreach (var b in bills)
+        {
+            b.BatchId = newBatchId;
+            var gross = amounts.GetValueOrDefault(b.FeeHeadId);
+            if (gross <= 0)
+            {
+                b.Status = DueStatus.Cancelled;
+                b.CancelledAt = DateTime.UtcNow;
+                continue;
+            }
+            b.GrossAmount = gross;
+            b.Discount = Math.Min(b.Discount, gross);   // re-priced properly just below
+        }
+        await db.SaveChangesAsync(ct);
+        db.ChangeTracker.Clear();
+        await RepriceManyAsync([studentId], ct);
+        return bills.Count;
     }
 
     /// <summary>Percentages on the gross amount first, then fixed amounts; never more than the gross.</summary>

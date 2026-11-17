@@ -10,17 +10,26 @@ public record FeeDueView(
     string Period, string PeriodLabel, string Month,
     int GrossAmount, int Discount, int Amount, int PaidAmount,
     string DueDate, string Status, string? LastPaidOn, int RemindersSent,
-    string StudentName, string BatchName, int DaysLate, int Balance);
+    string StudentName, string BatchName, int DaysLate, int Balance,
+    string? Kind = null);
 
 public record AllocationView(string DueId, string HeadName, string PeriodLabel, int Amount);
 
 /// <param name="BalanceAfter">What the student owed right after this payment (from the frozen receipt).</param>
 /// <param name="Receipt">Everything printed on the receipt, frozen at payment time. The receipt page draws only from this.</param>
+/// <param name="Cancelled">true = this payment was cancelled: it counts for nothing and has no allocations left.</param>
+/// <param name="Advance">Part of this payment not on any fee (kept as advance, or used on fees raised later).</param>
+/// <param name="Together">Other receipts paid at the same time (brothers and sisters paid together).</param>
 public record PaymentView(
     string Id, string ReceiptNo, string StudentId, int Amount, string Mode, string PaidOn,
     string Note, string ReceivedBy, List<AllocationView> Allocations,
     string StudentName, string BatchName, string ParentPhone, int BalanceAfter,
-    ReceiptSnapshot Receipt);
+    ReceiptSnapshot Receipt,
+    bool Cancelled = false, string? CancelledAt = null, string? CancelledBy = null, string? CancelReason = null,
+    List<LinkedReceipt>? Together = null);
+
+/// <summary>A receipt made in the same go as this one (another child of the family).</summary>
+public record LinkedReceipt(string Id, string ReceiptNo, string StudentName, int Amount);
 
 public static class FeeViews
 {
@@ -34,7 +43,8 @@ public static class FeeViews
             d.DueDate.ToString("yyyy-MM-dd"), d.Status, d.LastPaidOn?.ToString("yyyy-MM-dd"), d.RemindersSent,
             studentName, batchName,
             d.Status != "Paid" ? today.DayNumber - d.DueDate.DayNumber : 0,   // negative = not due yet
-            amount - d.PaidAmount);
+            amount - d.PaidAmount,
+            d.Kind);
     }
 
     /// <summary>Academic year a month belongs to. April session: "2027-02" → 2026.</summary>
@@ -63,6 +73,16 @@ public class FeeReadService(ClassKendraContext db, IConfiguration config)
             .Select(s => new { s.Id, s.Name, s.ParentName, s.ParentPhone, BatchName = s.Batch.Name })
             .ToDictionaryAsync(s => s.Id, ct);
 
+        // Receipts paid together with these (same GroupId), for "Paid together with Diya's receipt R-…".
+        var groupIds = payments.Where(p => p.GroupId != null).Select(p => p.GroupId).Distinct().ToList();
+        var together = (groupIds.Count == 0
+                ? []
+                : await db.Payments.AsNoTracking()
+                    .Where(p => groupIds.Contains(p.GroupId))
+                    .Select(p => new LinkedRow(p.Id, p.GroupId, p.ReceiptNo, p.Student.Name, p.Amount))
+                    .ToListAsync(ct))
+            .ToLookup(p => p.GroupId);
+
         var snapshots = payments.ToDictionary(p => p.Id, p => ReceiptSnapshots.Read(p.ReceiptSnapshot));
         if (snapshots.ContainsValue(null))
             await RebuildMissing(payments.Where(p => snapshots[p.Id] is null).ToList(), ids, snapshots,
@@ -83,9 +103,16 @@ public class FeeReadService(ClassKendraContext db, IConfiguration config)
                     .ToList(),
                 st?.Name ?? "Unknown", st?.BatchName ?? "", st?.ParentPhone ?? "",
                 receipt.BalanceAfter,
-                receipt);
+                receipt,
+                p.CancelledAt is not null,
+                p.CancelledAt is DateTime c ? DateTime.SpecifyKind(c, DateTimeKind.Utc).ToString("O") : null,
+                p.CancelledByName, p.CancelReason,
+                p.GroupId is null ? null : together[p.GroupId].Where(x => x.Id != p.Id)
+                    .Select(x => new LinkedReceipt(x.Id.ToString(), x.ReceiptNo, x.Student ?? "", x.Amount)).ToList());
         }).ToList();
     }
+
+    private record LinkedRow(Guid Id, Guid? GroupId, string ReceiptNo, string? Student, int Amount);
 
     /// <summary>
     /// Payments made before receipts were frozen: build the receipt once from today's data, mark it

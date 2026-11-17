@@ -32,6 +32,7 @@ public record StaffSettingsDto(string Start, string End, int GraceMinutes, doubl
     bool NotifyLeaveRequests, bool NotifyLeaveAnswers, bool LeaveWhatsApp);
 public record TimingSettingsInput(string Start, string End, int[] WeeklyOff);
 public record LocationInput(double Latitude, double Longitude);
+public record RadiusInput(int Radius);
 public record HolidayInput(string Name, string From, string To);
 public record PersonTimingInput(string? Start, string? End);
 public record LeaveNotificationsInput(bool NotifyLeaveRequests, bool NotifyLeaveAnswers, bool LeaveWhatsApp);
@@ -42,8 +43,12 @@ public record PushKeys(string P256dh, string Auth);
 [ApiController]
 [Route("api/v1/staff-attendance")]
 [Authorize]
-public class StaffAttendanceController(ClassKendraContext db, CurrentUser current, StaffAttendanceService svc) : ControllerBase
+public class StaffAttendanceController(ClassKendraContext db, CurrentUser current, StaffAttendanceService svc,
+    ClassKendraAPI.Features.Activity.AuditService audit) : ControllerBase
 {
+    /// <summary>How far from school a check-in is accepted: 300 m unless the owner chooses otherwise (50 m to 1 km).</summary>
+    private const int MinRadius = 50, MaxRadius = 1000;
+
     private const int MaxDaysBack = 60;
 
     /// <summary>GET /staff-attendance/status → { enabled, reason: "NotSchool" | "Plan" | null }</summary>
@@ -388,6 +393,27 @@ public class StaffAttendanceController(ClassKendraContext db, CurrentUser curren
         return await SettingsDto(ct);
     }
 
+    /// <summary>PUT /staff-attendance/settings/radius { radius } — how far from school staff can check in (50 to 1,000 m; 300 m to start with).</summary>
+    [HttpPut("settings/radius")]
+    [Authorize(Roles = "Owner")]
+    public async Task<ActionResult<StaffSettingsDto>> SaveRadius(RadiusInput input, CancellationToken ct)
+    {
+        if (await Blocked(ct) is { } blocked) return blocked;
+        if (current.TenantId is not Guid tenantId) return BadRequest(new { message = "Set up your centre first." });
+        if (input.Radius is < MinRadius or > MaxRadius)
+            return BadRequest(new { message = $"Choose a distance between {MinRadius} m and {MaxRadius:N0} m." });
+        var s = await svc.SettingsForUpdateAsync(tenantId, ct);
+        if (s.RadiusMeters != input.Radius)
+        {
+            await audit.AddAsync(ClassKendraAPI.Features.Activity.AuditActions.CheckInRadiusChanged, "Settings", null,
+                $"Changed the staff check-in distance from {s.RadiusMeters} m to {input.Radius} m", null, null, ct);
+            s.RadiusMeters = input.Radius;
+            s.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+        return await SettingsDto(ct);
+    }
+
     /// <summary>PUT /staff-attendance/settings/notifications { notifyLeaveRequests, notifyLeaveAnswers, leaveWhatsApp }</summary>
     [HttpPut("settings/notifications")]
     [Authorize(Roles = "Owner")]
@@ -416,7 +442,7 @@ public class StaffAttendanceController(ClassKendraContext db, CurrentUser curren
         var to = DateOnly.TryParse(input.To, out var t) ? t : from;
         if (to < from) return BadRequest(new { message = "The last day can't be before the first day." });
         if (to.DayNumber - from.DayNumber > 92) return BadRequest(new { message = "A holiday can be at most 3 months long." });
-        db.StaffHolidays.Add(new StaffHoliday { TenantId = tenantId, Name = name, FromDate = from, ToDate = to });
+        db.Holidays.Add(new Holiday { TenantId = tenantId, Name = name, FromDate = from, ToDate = to });
         await db.SaveChangesAsync(ct);
         return await SettingsDto(ct);
     }
@@ -426,7 +452,7 @@ public class StaffAttendanceController(ClassKendraContext db, CurrentUser curren
     public async Task<ActionResult<StaffSettingsDto>> DeleteHoliday(Guid id, CancellationToken ct)
     {
         if (await Blocked(ct) is { } blocked) return blocked;
-        await db.StaffHolidays.Where(h => h.Id == id).ExecuteDeleteAsync(ct);
+        await db.Holidays.Where(h => h.Id == id).ExecuteDeleteAsync(ct);
         return await SettingsDto(ct);
     }
 
@@ -473,7 +499,7 @@ public class StaffAttendanceController(ClassKendraContext db, CurrentUser curren
     private async Task<StaffSettingsDto> SettingsDto(CancellationToken ct)
     {
         var s = await svc.SettingsAsync(ct);
-        var holidays = await db.StaffHolidays.AsNoTracking().Where(h => h.ToDate >= Clock.Today.AddDays(-31))
+        var holidays = await db.Holidays.AsNoTracking().Where(h => h.ToDate >= Clock.Today.AddDays(-31))
             .OrderBy(h => h.FromDate).ToListAsync(ct);
         var staff = await db.Users.AsNoTracking().Where(u => u.IsActive && StaffAttendanceService.StaffRoles.Contains(u.Role))
             .OrderBy(u => u.Name).Select(u => new { u.Id, u.Name, u.Role, u.StaffStartTime, u.StaffEndTime }).ToListAsync(ct);

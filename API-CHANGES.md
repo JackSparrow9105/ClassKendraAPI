@@ -184,3 +184,172 @@ Only for schools on School 200 / 300 / 500 / 1000 (and trials). Others get 403 `
   Message types `LeaveRequest`, `LeaveAnswer`; Meta templates `leave_request` [name, dates, days, reason],
   `leave_approved` [dates, centre], `leave_rejected` [dates, reason, centre] (+ `_free` variants unused: schools only).
 - App notifications: `GET push/key`, `POST push/subscriptions { endpoint, keys: { p256dh, auth } }`, `DELETE push/subscriptions?endpoint=`.
+
+
+---
+
+# 18 Nov 2026 — safety changes (paging, cancelled payments, activity log, leaving, holidays, 300 m)
+
+**Database first:** run `Database/2026-11-18-leaving-holidays-activity-log.sql` (after `2026-11-17-staff-attendance.sql`). Safe to run again.
+The Angular app already has the matching types in `core/models/models.ts` and calls these endpoints.
+
+## Long lists come in pages
+All take `page` (starts at 1) and `pageSize` (default 50, at most 200) and return `{ items, total, page, pageSize }`.
+The old list endpoints still work and still return everything.
+
+| Endpoint | Extra filters | Extra fields in the reply |
+|---|---|---|
+| `GET students/page` | `batchId, search, kind=new\|existing, status=Active\|Left` | `newCount` |
+| `GET fees/page` | `month, status, search, batchId` (as `GET fees`) | `pendingTotal, pendingCount, paidTotal` — for everyone who matches, not only the page |
+| `GET payments/page` | `from, to, mode, batchId, studentId, search, includeCancelled` | `totalAmount` (cancelled never counted) |
+| `GET messages/page` | `type, status, studentId, search` | |
+| `GET activity` (owner) | `action, search` | |
+
+## Payments are cancelled, never deleted
+- `DELETE payments/{id}` is **gone** (405). Use `POST payments/{id}/cancel { reason }` → `PaymentView` with `cancelled: true`.
+- Owner **and** office staff. The reason is required (10–300 letters). When staff cancel, every owner gets an app notification.
+- The row stays (`CancelledAt, CancelledByUserId, CancelledByName, CancelReason`), its money goes back on the bills, and the
+  receipt number is never reused. Online (Razorpay) payments can't be cancelled here.
+- **Every query on `db.Payments` skips cancelled payments automatically** (query filter `NotCancelled` in
+  `ClassKendraContext.Tenant.cs`), so totals, reports and balances need no change. To include them:
+  `db.Payments.IgnoreQueryFilters([ClassKendraContext.NotCancelled])` — the centre filter stays on.
+  Don't call the plain `IgnoreQueryFilters()` on Payments unless you also want other centres' rows.
+- `GET payments/{id}` and `GET students/{id}/fees` show cancelled receipts too, marked `cancelled`.
+
+## Activity log (`AuditLogs`)
+`AuditService.AddAsync(action, entityType, entityId, summary, reason, data, ct)` adds a line that is saved by the caller's
+next `SaveChanges`, so the line and the change are written together. Actions so far: `PaymentCancelled, StudentLeft,
+StudentRejoined, FeesWaived, HolidayAdded, HolidayRemoved, CheckInRadiusChanged`. Nothing edits or deletes these rows.
+
+## Students leaving
+- `POST students/{id}/leave { leftOn, reason, note, dues, waiveReason, keepReminding }` → `{ student, billsCancelled, stillOwed, waived }`
+  - `reason`: `Left | Transferred | PassedOut | Removed`
+  - Bills for months **after** the leaving month with no money against them are cancelled.
+  - `dues: "Keep"` (default): earlier unpaid bills stay owed. `keepReminding` (default true) keeps fee reminders going.
+  - `dues: "Waive"` + `waiveReason`: unpaid bills are cancelled; part-paid bills close at what was paid (the rest becomes discount).
+- `POST students/{id}/rejoin { batchId? }` → `Student`. Bills start again from this month.
+- `DELETE students/{id}` still works for old app versions = leave today, reason `Left`, dues kept.
+  **Bug fixed:** it used to cancel every unpaid bill, which wiped real arrears.
+- `Student` has `leftOn, leftReason, leftNote, remindAfterLeaving`.
+- The parent pay link keeps working for a student who left while they still owe something.
+
+## Holidays — one list for the whole centre
+- Table `StaffHolidays` is renamed `Holidays` (rows kept); entity `Holiday`, `db.Holidays`.
+- `GET holidays?from=&to=` (everyone), `GET holidays/on?date=`, `POST holidays { name, from, to }`, `DELETE holidays/{id}` (owner).
+  Works for coaching centres and every plan. The old `staff-attendance/holidays` endpoints still work on the same table.
+- On a holiday: no absent alerts (`GET attendance/{batchId}` returns `holidayName`; the register can still be saved),
+  automatic fee reminders are skipped and sent on the next working day, dashboards show no classes, staff are not marked absent.
+
+## Staff check-in distance
+- Default 300 m (was 200); the script raises existing schools below 300 to 300.
+- `PUT staff-attendance/settings/radius { radius }` — owner, 50 to 1,000 m.
+
+
+---
+
+# 19 Nov 2026 — advance, refunds, waivers and charges, opening balance, late fee, batch change, siblings
+
+**Database first:** run `Database/2026-11-19-advance-refunds-late-fees-siblings.sql` (after the 18 Nov script). Safe to run again.
+
+## Advance (money paid that isn't on any fee)
+- No column: `AdvanceService` works it out as payments − what they put on fees − refunds (cancelled payments never count).
+- New bills use it automatically, oldest bill first, from the oldest payment (`AdvanceService.ApplyAsync`, called after
+  every billing run, late fee, charge, waiver and opening balance).
+- `POST payments` takes `keepExtra: true`: money beyond the ticked fees goes on the student's other unpaid fees, then
+  stays as advance (the receipt shows "Kept as advance"). Without it, paying more than the ticked fees is still refused.
+- `StudentFeeHistory.advance`. Cancelling a payment whose advance was already refunded is refused.
+
+## Refunds
+- `POST students/{id}/refunds { amount, mode: Cash|UPI|Cheque|Bank, refundedOn, reason }` → `RF-2026-0001`.
+- Only out of the advance. To refund money already on a fee: waive that much of the fee first (the paid part above the
+  new amount becomes advance), then refund. Refunds can't be undone. Activity log.
+- Collection report: `refunded` and `waived` for the month.
+
+## Waive part of a fee / extra charges
+- `POST students/{id}/dues/{dueId}/waive { amount, reason }` — lowers one bill (stored as discount + a `FeeAdjustments`
+  row, so re-pricing keeps it). Waived to ₹0 = closed, and never raised again (a fully waived late fee stays gone).
+- `POST students/{id}/charges { name, amount, dueDate, reason }` — a bill for one student under the hidden `Charge` type.
+
+## Opening balance (centres starting mid-year)
+- `GET/PUT students/{id}/opening-balance { previousDues, advancePaid, asOn }`.
+- Previous dues = one bill "Previous dues" (period `OB`). Advance paid = one payment of mode `Opening` (number `OB-…`),
+  excluded from every collection total (reports, dashboard, receipts list, "paid this session").
+- Changeable until money is paid on the previous dues or the advance is used.
+- Excel import: optional columns **Previous dues** and **Advance paid**.
+
+## Late fee (Fees and reminders screen)
+- `FeeSettings.lateFeeType` None | Once | PerDay, `lateFeeAmount`, `lateFeeAfterDays`, `lateFeeMax` (PerDay; 0 = no limit).
+- `LateFeeService` runs in the daily job (after billing, before reminders) and right after fee settings are saved.
+  One late-fee bill per overdue bill of the centre's own fees (`ParentDueId`), labelled with the fee and period.
+  Per-day fees grow until the bill is paid and never go down by themselves. Students who left get none.
+  Late fees count in what's owed but never trigger a reminder on their own.
+
+## Hidden fee types
+`FeeHeads.Kind` / `FeeDues.Kind`: `OpeningBalance`, `LateFee`, `Charge`. One hidden fee type per kind per centre
+(made when first needed). They are excluded from fee setup, the billing run, concessions and re-pricing.
+
+## Batch change mid-month
+`PUT students/{id}` takes `chargeNewBatchThisMonth`. Default: this month's fees stay at the old batch's amounts, the new
+batch's fees start next month. `true`: this month's fees with nothing paid on them are re-priced at the new batch's
+amounts. Every batch change is recorded in `StudentBatchHistories` and the activity log.
+
+## Siblings (same parent phone)
+- Sibling discount in fee settings: `siblingDiscountType` None | Percent | Amount, `siblingDiscountValue`,
+  `siblingDiscountHeadId` (null = every fee). The child who joined first pays full fees; every other child still
+  studying here gets it, unless they already have a manual "Sibling" discount. Applied to unpaid fees when the setting
+  changes and whenever a family changes (a child joins, leaves, rejoins, or a phone number changes).
+- **One WhatsApp reminder per family**: "Aarav & Diya's fees of ₹9,000…" with one pay link. Same approved template
+  (`fee_reminder`), the names go in the student-name parameter. At most one reminder per phone per day.
+- `GET students/{id}/family` → brothers and sisters with their unpaid fees.
+- `POST payments/family { items: [{ studentId, dueIds }], amount, mode, paidOn, note }` → one receipt per child, spread
+  over all ticked fees oldest first, linked by `Payments.GroupId` (`PaymentView.together`).
+- Parent pay page shows every child (`children`), and one online payment is split into a receipt per child. The Razorpay
+  payment id is kept on the first receipt only (it must be unique).
+
+
+---
+
+# 20 Nov 2026 — Excel downloads, all my data, undo, offline attendance
+
+**Database:** run `Database/2026-11-20-undo-and-offline.sql` (adds `PromotionRuns.UndoneAt`, `UndoneByName`).
+
+## Excel downloads (`Features/Exports`)
+- `Common/Xlsx.cs` — a small .xlsx writer with no NuGet package: frozen bold header, filters, column widths, real
+  numbers/money/dates. Checked with openpyxl; opens in Excel, Google Sheets, LibreOffice.
+- `GET exports/{students|fees|receipts|refunds|daybook}?from=&to=&status=` — owner and office staff. Dates default to
+  this session's start → today, at most 400 days. Day-book = every receipt and refund, plus daily totals by mode.
+- `GET exports/all` — owner only: a .zip of 9 Excel files (students, fees + fee changes, receipts + refunds, day-book,
+  attendance, staff + staff attendance + leave, setup + holidays, WhatsApp messages, activity log) and a README.
+- Every download is written to the activity log (`DataExported`).
+
+## Undo
+- `GET students/promotions` (owner) — promotions of the last 60 days with `canUndo`.
+- `POST students/promotions/{id}/undo` — within 7 days, once. Students go back to their old batch/class, students
+  marked as leaving come back, fees raised since the promotion are removed. Left as they are (and listed with the reason):
+  students paid for since the promotion, students whose new fees already have money on them, students changed by hand since.
+- `POST payments/{id}/restore { reason }` (owner) — a cancelled payment counts again with its receipt number; the money
+  goes on unpaid fees oldest first, the rest is advance.
+- Student who left: `POST students/{id}/rejoin` (Phase 1) is the undo.
+
+## Offline attendance
+- `POST attendance/{batchId}` takes `clientSavedAt`. A register saved offline and sent later is refused (409, `conflict: true`)
+  if someone else saved that register after it, instead of overwriting the newer one.
+- The app keeps unsent registers on the phone (`OfflineAttendanceService`, localStorage) and sends them when online.
+  The service worker caches `batches`, `students?…`, `attendance/…`, `dashboard/teacher` and `holidays/on` (ngsw-config
+  "attendance-offline", network first with 5 s timeout) so the attendance screen opens without internet. That cache is
+  cleared on sign-out. Payments and staff check-in stay online only.
+- **If the API address changes**, update the URLs in `ngsw-config.json` › `attendance-offline`.
+
+
+---
+
+# Student profile and search
+
+- `GET students/{id}/attendance?month=yyyy-MM` — teachers too (own classes): session %, present/absent counts since the
+  student joined or moved to this batch, every register of the month, last 10 absences.
+- `GET students/{id}/fees/upcoming` (office) — fees still to be raised this session from today's fee setup, with due
+  dates and amounts after discounts (sibling discount included).
+- `GET students/page?status=All` (office) — students studying here and those who left, studying first. Used by the
+  search bar on every page (name, parent phone, admission number).
+- The profile page (`/students/{id}`) is open to teachers: details and attendance only, no fees.
+- Slips (fee statement, fee due slip, no-dues certificate) are drawn in the app from `GET students/{id}/fees`.

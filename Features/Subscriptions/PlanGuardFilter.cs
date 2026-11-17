@@ -35,8 +35,9 @@ public class PlanGuardFilter(CurrentUser current, PlanService plans) : IAsyncAct
 
             // Too many students for the Free plan: read-only, but students who left can still be removed.
             var isWrite = !(HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method));
-            var removingStudent = HttpMethods.IsDelete(method)
-                && context.HttpContext.Request.Path.StartsWithSegments("/api/v1/students");
+            var path = context.HttpContext.Request.Path;
+            var removingStudent = path.StartsWithSegments("/api/v1/students")
+                && (HttpMethods.IsDelete(method) || (path.Value ?? "").EndsWith("/leave", StringComparison.OrdinalIgnoreCase));
             if (isWrite && !removingStudent && await plans.FreeLimitErrorAsync(ct) is { } limit)
             {
                 context.Result = new ObjectResult(new { message = limit, freePlan = true })
